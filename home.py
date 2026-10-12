@@ -60,6 +60,28 @@ DEFAULT_PASSWORD = "1234"
 # Комнаты, которые получает каждый новый пользователь (по планировке 1floor.png)
 DEFAULT_ROOMS = ["Гостиная", "Спальня", "Кухня", "Прихожая", "Гараж", "Терраса"]
 
+# Стартовый дом Вячеслава (создаётся при первом запуске): дополнительные комнаты и устройства
+# (комната, модель, название, включено, настройки). Иван и Николай начинают с пустого дома.
+SEED_USER = "Вячеслав"
+SEED_EXTRA_ROOMS = ['Ванная']
+SEED_DEVICES = [
+    ('Гостиная', 'xiaomi_g10', 'Пылесос', 1, {"mode": "Эко", "plan": {"floor": "floor1", "x": 0.431, "y": 0.304}}),
+    ('Гостиная', 'aqara_g3', 'Видеокамера', 1, {"night_vision": True, "recording": True, "motion_alerts": True, "plan": {"floor": "floor1", "x": 0.67, "y": 0.384}}),
+    ('Гостиная', 'aqara_g4', 'Дверной звонок', 1, {"volume": 40, "motion_alerts": True, "plan": {"floor": "floor1", "x": 0.613, "y": 0.257}}),
+    ('Гостиная', 'aqara_smoke', 'Датчик дыма', 1, {"battery": 97, "plan": {"floor": "floor1", "x": 0.774, "y": 0.325}}),
+    ('Гостиная', 'midea_breezeless', 'Кондиционер', 1, {"target_temp": 27, "mode": "Вентиляция", "fan_speed": 3, "led": True, "plan": {"floor": "floor1", "x": 0.531, "y": 0.403}}),
+    ('Гостиная', 'yeelight_w3', 'Лампочка', 1, {"brightness": 80, "color_temp": 3700, "color": "#48dbfb", "plan": {"floor": "floor1", "x": 0.739, "y": 0.555}}),
+    ('Спальня', 'roborock_s8', 'Робот-пылесос', 0, {"mode": "Турбо", "vac_battery": 100.0, "plan": {"floor": "floor2", "x": 0.768, "y": 0.711}, "vac_state": "docked", "vac_progress": 0.0, "vac_return": 0.0}),
+    ('Спальня', 'aqara_g3', 'Видеокамера', 1, {"night_vision": True, "recording": True, "motion_alerts": True, "plan": {"floor": "floor2", "x": 0.715, "y": 0.243}}),
+    ('Кухня', 'mi_heater_s', 'Обогреватель', 1, {"target_temp": 26, "mode": "Эко", "child_lock": True}),
+    ('Кухня', 'mi_kettle_2pro', 'Электрический чайник', 0, {"target_temp": 60, "keep_warm": False, "led": True, "water_ml": 1700, "water_temp": 22.0, "plan": {"floor": "floor1", "x": 0.761, "y": 0.701}}),
+    ('Прихожая', 'aqara_leak', 'Датчик протечки', 1, {"battery": 93, "plan": {"floor": "floor1", "x": 0.232, "y": 0.299}}),
+    ('Гараж', 'aqara_g3', 'Видеокамера', 1, {"night_vision": False, "recording": True, "motion_alerts": True, "plan": {"floor": "floor1", "x": 0.172, "y": 0.42}}),
+    ('Терраса', 'crmcr_x1', 'Сейф', 1, {"locked": True, "battery": 92, "plan": {"floor": "floor1", "x": 0.7, "y": 0.09}}),
+    ('Терраса', 'aqara_g3', 'Видеокамера', 1, {"night_vision": True, "recording": True, "motion_alerts": True, "plan": {"floor": "floor1", "x": 0.847, "y": 0.116}}),
+    ('Ванная', 'midea_wd10', 'Стиральная машина', 0, {"mode": "Шерсть", "child_lock": True, "wash_elapsed": 0.0}),
+]
+
 # Параметры системы альтернативного питания
 BATTERY_CAPACITY_WH = 30000     # ёмкость аккумулятора, Вт·ч (30 кВт·ч)
 SOLAR_PEAK_W = 6000             # пиковая мощность солнечных панелей, Вт (6 кВт)
@@ -809,7 +831,20 @@ class Database:
     def seed_data(self):
         for username in DEFAULT_USERS:
             if self.get_user(username) is None:
-                self.create_user(username, DEFAULT_PASSWORD)
+                user_id = self.create_user(username, DEFAULT_PASSWORD)
+                if username == SEED_USER:
+                    self._seed_home(user_id)
+
+    def _seed_home(self, user_id):
+        for room_name in SEED_EXTRA_ROOMS:
+            self.add_room(user_id, room_name)
+        rooms = {room["name"]: room["id"] for room in self.get_rooms(user_id)}
+        for room_name, model_code, name, is_on, settings in SEED_DEVICES:
+            device_id = self.add_device(user_id, rooms[room_name], model_code, name)
+            full = default_settings(MODELS[model_code])
+            full.update(settings)
+            self.save_settings(device_id, full)
+            self.set_device_state(device_id, bool(is_on))
 
     # ---------- пользователи ----------
 
@@ -1909,10 +1944,6 @@ class LoginWindow(QWidget):
         layout.addWidget(login_btn)
 
         layout.addStretch()
-        hint = QLabel("Демо-аккаунты: " + ", ".join(DEFAULT_USERS) + f" — пароль {DEFAULT_PASSWORD}")
-        hint.setObjectName("subtitle")
-        hint.setWordWrap(True)
-        layout.addWidget(hint)
         return page
 
     def _build_register_page(self):
