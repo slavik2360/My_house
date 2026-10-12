@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+  <title>Умный дом</title>
+  <meta name="description" content="Управление умным домом с солнечными панелями и аккумулятором">
+  <meta name="theme-color" content="#2d5f8f">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Умный дом">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="icon" type="image/png" href="icons/icon-192.png">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- вход и регистрация -->
+  <div id="login" class="screen hidden">
+    <div class="login-hero">
+      <div class="login-icon">🏡☀️</div>
+      <h1>Умный дом</h1>
+      <p>Управление устройствами дома с альтернативными источниками питания</p>
+    </div>
+    <div class="login-card">
+      <div class="segments">
+        <button class="segment active" data-tab="login">Вход</button>
+        <button class="segment" data-tab="register">Регистрация</button>
+      </div>
+      <form id="loginForm" class="form">
+        <input id="loginUser" placeholder="Имя пользователя" autocomplete="username" autocapitalize="off">
+        <input id="loginPass" type="password" placeholder="Пароль" autocomplete="current-password">
+        <div class="error" id="loginError"></div>
+        <button class="btn primary" type="submit">Войти</button>
+      </form>
+      <form id="registerForm" class="form hidden">
+        <input id="regUser" placeholder="Имя пользователя (2–32 символа)" autocapitalize="off">
+        <input id="regPass" type="password" placeholder="Пароль (не менее 4 символов)" autocomplete="new-password">
+        <input id="regPass2" type="password" placeholder="Повторите пароль" autocomplete="new-password">
+        <div class="error" id="regError"></div>
+        <button class="btn primary" type="submit">Зарегистрироваться</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- главный экран -->
+  <div id="main" class="screen hidden">
+    <header class="top">
+      <div class="top-row">
+        <div id="homeTitle" class="home-title"></div>
+        <button id="userBtn" class="hbtn">👤</button>
+      </div>
+      <div class="top-row">
+        <div id="batteryChip" class="glass-chip"></div>
+        <div class="top-actions">
+          <button id="addBtn" class="hbtn">＋</button>
+          <button id="roomsBtn" class="hbtn">☰</button>
+        </div>
+      </div>
+      <nav id="roomTabs" class="room-tabs"></nav>
+    </header>
+    <main id="content"></main>
+    <nav class="bottom-nav">
+      <button data-page="devices" class="active"><span>📱</span>Устройства</button>
+      <button data-page="plan"><span>🗺</span>План</button>
+      <button data-page="energy"><span>📊</span>Энергия</button>
+      <button data-page="events"><span>🔔</span>События<i id="eventsBadge" class="badge hidden"></i></button>
+    </nav>
+  </div>
+
+  <div id="sheet" class="sheet hidden">
+    <div class="sheet-backdrop"></div>
+    <div class="sheet-panel">
+      <div class="sheet-head">
+        <button id="sheetBack" class="icon-btn hidden">←</button>
+        <div id="sheetTitle" class="sheet-title"></div>
+        <button id="sheetClose" class="icon-btn">✕</button>
+      </div>
+      <div id="sheetBody" class="sheet-body"></div>
+    </div>
+  </div>
+  <div id="toasts"></div>
+
+  <script src="data.js"></script>
+  <script src="core.js"></script>
+  <script src="visuals.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
