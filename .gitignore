@@ -1,0 +1,18 @@
+# виртуальное окружение и кэш Python
+env/
+venv/
+__pycache__/
+*.pyc
+
+# сборка PyInstaller
+build/
+dist/
+*.spec
+
+# данные, которые создаёт программа
+snapshots/
+*.db
+
+# системные файлы
+.DS_Store
+Thumbs.db
