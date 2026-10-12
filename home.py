@@ -818,6 +818,7 @@ class Database:
         "total_generated_wh": "REAL NOT NULL DEFAULT 0",
         "total_import_wh": "REAL NOT NULL DEFAULT 0",
         "total_export_wh": "REAL NOT NULL DEFAULT 0",
+        "seed_version": "INTEGER NOT NULL DEFAULT 0",
     }
 
     def migrate(self):
@@ -828,18 +829,29 @@ class Database:
                 self.conn.execute(f"ALTER TABLE users ADD COLUMN {column} {ddl}")
         self.conn.commit()
 
+    SEED_VERSION = 1
+
     def seed_data(self):
         for username in DEFAULT_USERS:
             if self.get_user(username) is None:
-                user_id = self.create_user(username, DEFAULT_PASSWORD)
-                if username == SEED_USER:
-                    self._seed_home(user_id)
+                self.create_user(username, DEFAULT_PASSWORD)
+        # Стартовые устройства досыпаются и в базу, созданную старой версией программы
+        user = self.get_user(SEED_USER)
+        if user["seed_version"] < self.SEED_VERSION:
+            self._seed_home(user["id"])
+            self.conn.execute("UPDATE users SET seed_version = ? WHERE id = ?", (self.SEED_VERSION, user["id"]))
+            self.conn.commit()
 
     def _seed_home(self, user_id):
+        existing_rooms = {room["name"] for room in self.get_rooms(user_id)}
         for room_name in SEED_EXTRA_ROOMS:
-            self.add_room(user_id, room_name)
+            if room_name not in existing_rooms:
+                self.add_room(user_id, room_name)
         rooms = {room["name"]: room["id"] for room in self.get_rooms(user_id)}
+        existing = {(d["room_name"], d["model_code"], d["name"]) for d in self.get_devices(user_id)}
         for room_name, model_code, name, is_on, settings in SEED_DEVICES:
+            if (room_name, model_code, name) in existing or room_name not in rooms:
+                continue  # уже есть (или пользователь удалил комнату) - не дублируем
             device_id = self.add_device(user_id, rooms[room_name], model_code, name)
             full = default_settings(MODELS[model_code])
             full.update(settings)
