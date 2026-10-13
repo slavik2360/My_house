@@ -425,18 +425,16 @@ class VacuumView extends CanvasView {
   draw(ctx, w, h) {
     const s = this.d.s, st = s.vac_state || "docked", [mx, my, mw, mh] = this.map(w, h);
     ctx.fillStyle = "#fff"; rr(ctx, 0, 0, w, h, 16); ctx.fill();
-    ctx.fillStyle = "#e6dccb"; ctx.strokeStyle = "#5d6670"; ctx.lineWidth = 5; rr(ctx, mx, my, mw, mh, 10); ctx.fill(); ctx.stroke();
-    ctx.fillStyle = "#d9c7b0"; ctx.beginPath(); ctx.ellipse(mx + mw / 2, my + mh / 2, mw * 0.18, mh * 0.18, 0, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = "rgba(110,90,70,0.6)"; this.dust.forEach(([x, y, r]) => { circle(ctx, mx + x * mw, my + y * mh, r); ctx.fill(); });
+    this.drawGround(ctx, mx, my, mw, mh);
     const progress = st !== "docked" || (s.vac_progress || 0) > 0 ? this.prog : 0;
     if (progress > 0.001) {
       const pos = this.posAt(progress, w, h), rowPx = mh * 0.8 / (this.rows - 1);
       ctx.beginPath(); ctx.moveTo(pos.pts[0][0], pos.pts[0][1]);
       for (let i = 1; i < pos.idx; i++) ctx.lineTo(pos.pts[i][0], pos.pts[i][1]);
       ctx.lineTo(pos.x, pos.y);
-      ctx.strokeStyle = "#f8f4ec"; ctx.lineWidth = rowPx + 3; ctx.lineCap = "round"; ctx.lineJoin = "round"; ctx.stroke();
-      ctx.strokeStyle = "rgba(0,0,0,0.05)"; ctx.lineWidth = 2; ctx.stroke();
+      this.drawTrail(ctx, rowPx);
     }
+    this.drawObstacles(ctx, mx, my, mw, mh);
     const [dx, dy] = this.px(this.dock, w, h);
     ctx.fillStyle = "#2f3640"; rr(ctx, dx - 16, dy - 8, 32, 14, 4); ctx.fill();
     ctx.fillStyle = "#00d27a"; circle(ctx, dx, dy - 1, 3); ctx.fill();
@@ -448,15 +446,10 @@ class VacuumView extends CanvasView {
       ctx.setLineDash([6, 5]); ctx.strokeStyle = "rgba(0,168,90,0.6)"; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(rx, ry); ctx.lineTo(dx, dy - 20); ctx.stroke(); ctx.setLineDash([]);
     } else { rx = dx; ry = dy - 22; ang = -Math.PI / 2; }
     ctx.save(); ctx.translate(rx, ry); ctx.rotate(ang);
-    if (st === "cleaning") {
-      ctx.strokeStyle = "#5d6670"; ctx.lineWidth = 1.5;
-      for (let i = 0; i < 3; i++) { const a = this.phase * 0.7 + i * 2.09; ctx.beginPath(); ctx.moveTo(10, 10); ctx.lineTo(10 + 7 * Math.cos(a), 10 + 7 * Math.sin(a)); ctx.stroke(); }
-    }
-    ctx.fillStyle = "#fff"; ctx.strokeStyle = "#2f3640"; ctx.lineWidth = 2; circle(ctx, 0, 0, 14); ctx.fill(); ctx.stroke();
-    ctx.fillStyle = "#2f3640"; circle(ctx, -2, 0, 5); ctx.fill();
-    ctx.strokeStyle = st === "cleaning" ? "#00b96b" : "#9aa5b1"; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(0, 0, 14, -0.87, 0.87); ctx.stroke();
+    this.drawRobot(ctx, st);
     ctx.restore();
-    const status = { cleaning: `🧹 Уборка · ${Math.round((s.vac_progress || 0) * 100)}% · ≈${Math.round((s.vac_progress || 0) * 18)} м²`,
+    const info = D.robotInfo[this.d.type], area = MODELS[this.d.model].area || info.area;
+    const status = { cleaning: `${info.icon} ${info.verb} · ${Math.round((s.vac_progress || 0) * 100)}% · ≈${Math.round((s.vac_progress || 0) * area)} м²`,
                      paused: `⏸ Пауза · ${Math.round((s.vac_progress || 0) * 100)}%`, returning: "↩️ Возвращается на базу",
                      docked: "🏠 На базе" + ((s.vac_battery ?? 100) < 99.5 ? " · заряжается ⚡" : "") }[st];
     ctx.fillStyle = "#12293c"; ctx.font = "bold 13px -apple-system, sans-serif"; ctx.textAlign = "left"; ctx.textBaseline = "middle";
@@ -465,6 +458,136 @@ class VacuumView extends CanvasView {
     ctx.strokeStyle = "#9fb3c3"; ctx.lineWidth = 2; rr(ctx, bx, 15, 100, 14, 4); ctx.stroke();
     ctx.fillStyle = bat > 40 ? "#00b96b" : bat > 15 ? "#f5a623" : "#e5484d"; rr(ctx, bx + 2, 17, 96 * bat / 100, 10, 3); ctx.fill();
     ctx.fillStyle = "#12293c"; ctx.fillText(Math.round(bat) + "%", bx + 106, 22);
+  }
+}
+
+// части рисунка пылесоса, которые газонокосилка рисует по-своему
+Object.assign(VacuumView.prototype, {
+  drawGround(ctx, mx, my, mw, mh) {
+    ctx.fillStyle = "#e6dccb"; ctx.strokeStyle = "#5d6670"; ctx.lineWidth = 5; rr(ctx, mx, my, mw, mh, 10); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = "#d9c7b0"; ctx.beginPath(); ctx.ellipse(mx + mw / 2, my + mh / 2, mw * 0.18, mh * 0.18, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "rgba(110,90,70,0.6)"; this.dust.forEach(([x, y, r]) => { circle(ctx, mx + x * mw, my + y * mh, r); ctx.fill(); });
+  },
+  drawTrail(ctx, rowPx) {
+    ctx.strokeStyle = "#f8f4ec"; ctx.lineWidth = rowPx + 3; ctx.lineCap = "round"; ctx.lineJoin = "round"; ctx.stroke();
+    ctx.strokeStyle = "rgba(0,0,0,0.05)"; ctx.lineWidth = 2; ctx.stroke();
+  },
+  drawObstacles() {},
+  drawRobot(ctx, st) {
+    if (st === "cleaning") {
+      ctx.strokeStyle = "#5d6670"; ctx.lineWidth = 1.5;
+      for (let i = 0; i < 3; i++) { const a = this.phase * 0.7 + i * 2.09; ctx.beginPath(); ctx.moveTo(10, 10); ctx.lineTo(10 + 7 * Math.cos(a), 10 + 7 * Math.sin(a)); ctx.stroke(); }
+    }
+    ctx.fillStyle = "#fff"; ctx.strokeStyle = "#2f3640"; ctx.lineWidth = 2; circle(ctx, 0, 0, 14); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = "#2f3640"; circle(ctx, -2, 0, 5); ctx.fill();
+    ctx.strokeStyle = st === "cleaning" ? "#00b96b" : "#9aa5b1"; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(0, 0, 14, -0.87, 0.87); ctx.stroke();
+  },
+});
+
+// ---------- газонокосилка ----------
+
+class LawnMowerView extends VacuumView {
+  constructor(parent, d) {
+    super(parent, d);
+    let seed = d.id * 7 + 3;
+    const rnd = () => { seed = (seed * 9301 + 49297) % 233280; return seed / 233280; };
+    this.blades = Array.from({ length: 700 }, () => [0.02 + rnd() * 0.96, 0.04 + rnd() * 0.93, rnd() * 0.8 - 0.4, Math.floor(rnd() * 3)]);
+  }
+  drawGround(ctx, mx, my, mw, mh) {
+    ctx.fillStyle = "#3f8a3a"; ctx.strokeStyle = "#7a5a3a"; ctx.lineWidth = 5; rr(ctx, mx, my, mw, mh, 10); ctx.fill(); ctx.stroke();
+    const sway = Math.sin(this.phase * 0.15) * 0.15, shades = ["#2f7a2c", "#4c9a3f", "#5fae4a"];
+    ctx.lineWidth = 1.6;
+    this.blades.forEach(([x, y, tilt, sh]) => {
+      const bx = mx + x * mw, by = my + y * mh;
+      ctx.strokeStyle = shades[sh]; ctx.beginPath(); ctx.moveTo(bx, by); ctx.lineTo(bx + (tilt + sway) * 6, by - 7); ctx.stroke();
+    });
+  }
+  drawTrail(ctx, rowPx) {
+    ctx.strokeStyle = "#8fd16f"; ctx.lineWidth = rowPx + 3; ctx.lineCap = "butt"; ctx.lineJoin = "round"; ctx.stroke();
+    ctx.strokeStyle = "rgba(255,255,255,0.16)"; ctx.lineWidth = rowPx * 0.45; ctx.stroke();
+  }
+  drawObstacles(ctx, mx, my, mw, mh) {
+    const tx = mx + mw * 0.72, ty = my + mh * 0.32;
+    ctx.fillStyle = "rgba(0,0,0,0.2)"; circle(ctx, tx + 6, ty + 8, 28); ctx.fill();
+    ctx.fillStyle = "#2d6a2f"; circle(ctx, tx, ty, 28); ctx.fill();
+    ctx.fillStyle = "#3f8f3f"; circle(ctx, tx - 8, ty - 8, 16); ctx.fill();
+    const bx = mx + mw * 0.2, by = my + mh * 0.55, bw = mw * 0.18, bh = mh * 0.16;
+    ctx.fillStyle = "#6b4a2f"; rr(ctx, bx, by, bw, bh, 12); ctx.fill();
+    ["#e07a5f", "#f2cc8f", "#ef476f", "#c77dff", "#ffd166", "#e07a5f", "#ffd166"].forEach((c, i) => {
+      ctx.fillStyle = c; circle(ctx, bx + 10 + (i * 37) % (bw - 20), by + 8 + (i * 23) % (bh - 16), 4.5); ctx.fill();
+    });
+  }
+  drawRobot(ctx, st) {
+    ctx.fillStyle = "#ff7a1a"; ctx.strokeStyle = "#1b1f24"; ctx.lineWidth = 2; rr(ctx, -17, -13, 34, 26, 9); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = "#2f3640";
+    [-15, 11].forEach(wy => { rr(ctx, -12, wy, 9, 4, 2); ctx.fill(); rr(ctx, 5, wy, 9, 4, 2); ctx.fill(); });
+    ctx.fillStyle = "#1b1f24"; circle(ctx, 3, 0, 6); ctx.fill();
+    if (st === "cleaning") {
+      ctx.strokeStyle = "rgba(255,255,255,0.7)"; ctx.lineWidth = 1.5;
+      for (let k = 0; k < 2; k++) { const a = this.phase * 1.1 + k * Math.PI; ctx.beginPath(); ctx.moveTo(3, 0); ctx.lineTo(3 + 6 * Math.cos(a), 6 * Math.sin(a)); ctx.stroke(); }
+      ctx.strokeStyle = "#9fe08a";
+      for (let k = 0; k < 4; k++) {
+        const off = (k * 4 + this.phase * 3) % 12, y = Math.sin(this.phase * 0.7 + k) * 8;
+        ctx.beginPath(); ctx.moveTo(-18 - off, y); ctx.lineTo(-21 - off, y - 2); ctx.stroke();
+      }
+    }
+  }
+}
+
+// ---------- автополив ----------
+
+class IrrigationView extends CanvasView {
+  constructor(parent, engine, d) {
+    super(parent, 300);
+    this.engine = engine; this.d = d; this.model = MODELS[d.model]; this.zones = this.model.zones || 1; this.phase = 0; this.drops = [];
+  }
+  zoneRects(w, h) {
+    const mx = 12, my = 44, mw = w - 24, mh = h - 88;
+    const cols = this.zones === 1 ? 1 : this.zones <= 4 ? 2 : 3, rows = Math.ceil(this.zones / cols), zw = mw / cols, zh = mh / rows;
+    return Array.from({ length: this.zones }, (_, i) => [mx + (i % cols) * zw + 3, my + Math.floor(i / cols) * zh + 3, zw - 6, zh - 6]);
+  }
+  sprinklers([x, y, w, h]) { return w < 170 ? [[x + w / 2, y + h / 2]] : [[x + w * 0.3, y + h / 2], [x + w * 0.7, y + h / 2]]; }
+  active() { return this.d.on ? Math.min(this.zones - 1, Math.floor((this.d.s.irr_elapsed || 0) / Math.max(1, this.d.s.irr_minutes || 10))) : null; }
+  step(k) {
+    this.phase += 0.08 * k;
+    const z = this.active(), w = this.canvas.clientWidth;
+    if (z !== null) {
+      this.sprinklers(this.zoneRects(w, this.height)[z]).forEach(([cx, cy]) => {
+        for (let i = 0; i < 3; i++) {
+          const a = this.phase * 2.2 + (Math.random() - 0.5) * 0.5, sp = 2 + Math.random() * 2;
+          this.drops.push([cx, cy, Math.cos(a) * sp, Math.sin(a) * sp, 1]);
+        }
+      });
+    }
+    this.drops.forEach(d => { d[0] += d[2] * k; d[1] += d[3] * k; d[4] -= 0.035 * k; });
+    this.drops = this.drops.filter(d => d[4] > 0);
+  }
+  draw(ctx, w, h) {
+    const s = this.d.s, moisture = s.moisture ?? 35, wet = Math.max(0, Math.min(1, (moisture - 15) / 70)), z = this.active();
+    ctx.fillStyle = "#fff"; rr(ctx, 0, 0, w, h, 16); ctx.fill();
+    ctx.font = "bold 12px -apple-system, sans-serif"; ctx.textBaseline = "middle";
+    this.zoneRects(w, h).forEach((rc, i) => {
+      const grass = mixColor([184, 179, 106], [63, 154, 58], wet);
+      ctx.fillStyle = rgbCss(i === z ? mixColor(grass, [0, 0, 0], 0.12) : grass);
+      ctx.strokeStyle = i === z ? "#00a3e0" : "#7a5a3a"; ctx.lineWidth = i === z ? 3 : 2;
+      rr(ctx, ...rc, 10); ctx.fill(); ctx.stroke();
+      this.sprinklers(rc).forEach(([cx, cy]) => {
+        ctx.fillStyle = "#2f3640"; circle(ctx, cx, cy, 6); ctx.fill();
+        if (i === z) { const a = this.phase * 2.2; ctx.strokeStyle = "rgba(0,163,224,0.55)"; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(cx + Math.cos(a) * 22, cy + Math.sin(a) * 22); ctx.stroke(); }
+      });
+      ctx.fillStyle = "#fff"; ctx.textAlign = "left"; ctx.fillText("Зона " + (i + 1), rc[0] + 8, rc[1] + 12);
+    });
+    this.drops.forEach(([x, y, , , life]) => { ctx.fillStyle = `rgba(80,180,255,${0.8 * life})`; circle(ctx, x, y, 2.4); ctx.fill(); });
+    let status = "Полив выключен";
+    if (this.d.on) {
+      const left = this.zones * (s.irr_minutes || 10) - (s.irr_elapsed || 0);
+      status = `💦 Полив зоны ${z + 1} из ${this.zones} · осталось ${Math.floor(left / 60)}:${String(Math.floor(left % 60)).padStart(2, "0")}`;
+    } else if (this.engine.state && this.engine.state.raining) status = "🌧 Идёт дождь — поливать не нужно";
+    ctx.fillStyle = "#12293c"; ctx.font = "bold 13px -apple-system, sans-serif"; ctx.textAlign = "left"; ctx.fillText(status, 14, 22, w - 28);
+    const bw = w - 190;
+    ctx.strokeStyle = "#9fb3c3"; ctx.lineWidth = 2; rr(ctx, 14, h - 32, bw, 14, 5); ctx.stroke();
+    ctx.fillStyle = rgbCss(mixColor([224, 164, 88], [47, 141, 228], wet)); rr(ctx, 16, h - 30, (bw - 4) * Math.min(1, moisture / 100), 10, 4); ctx.fill();
+    ctx.fillStyle = "#12293c"; ctx.fillText(`💧 Почва ${Math.round(moisture)}% · ${Math.round(s.irr_water || 0)} л`, bw + 22, h - 25);
   }
 }
 
@@ -568,7 +691,7 @@ class CameraView extends CanvasView {
     this.ptz = !!this.model.ptz; this.pan = 0.5; this.panTarget = 0.5; this.person = null; this.n = 0;
     this.canvas.style.height = "auto"; this.canvas.style.aspectRatio = "16 / 9";
   }
-  kind() { return sceneKind(this.engine.roomName(this.d.roomId), this.model); }
+  kind() { return sceneKind(this.engine.roomName(this.d.roomId), this.model, this.engine.roomFloor(this.d.roomId)); }
   panBy(v) { this.panTarget = Math.max(0, Math.min(1, this.panTarget + v)); }
   prepare() { this.height = this.canvas.clientWidth * 9 / 16; return super.prepare(); }
   step(k) {
@@ -596,14 +719,14 @@ class CameraView extends CanvasView {
     }
     const st = this.engine.state || { simMinutes: 720 }, hour = (st.simMinutes / 60) % 24, night = !(hour >= 6.5 && hour < 19.5);
     const lights = this.engine.devices.some(x => x.on && x.roomId === this.d.roomId && TYPES[x.type].group === LIGHT_GROUP);
-    const kind = this.kind(), outdoor = kind === "terrace" || kind === "porch", lit = lights && !outdoor, ir = night && !lit && s.night_vision;
+    const kind = this.kind(), outdoor = ["terrace", "porch", "yard"].includes(kind), lit = lights && !outdoor, ir = night && !lit && s.night_vision;
     const variant = !night ? "day" : ir ? "ir" : "night", img = sceneImage(kind, variant);
     // панорама 1600x600, кадр - 2/3 ширины; поворотные камеры двигают кадр
     const viewFrac = 2 / 3, sx = (this.ptz ? this.pan : 0.5) * (1 - viewFrac);
     if (img.complete && img.naturalWidth) ctx.drawImage(img, sx * img.naturalWidth, 0, img.naturalWidth * viewFrac, img.naturalHeight, 0, 0, w, h);
     else { ctx.fillStyle = "#1b2430"; ctx.fillRect(0, 0, w, h); }
     if (this.person) {
-      const px = (this.person.x - sx) / viewFrac * w, porch = kind === "porch";
+      const px = (this.person.x - sx) / viewFrac * w, porch = kind === "porch" || kind === "yard";
       const foot = h * (porch ? 0.86 : 0.95), ph = h * (porch ? 0.42 : 0.62);
       drawPerson(ctx, px, foot, ph, this.person.phase, ir ? "#9a9a9a" : this.person.color);
       if (s.motion_alerts !== false && px > -40 && px < w + 40) {
