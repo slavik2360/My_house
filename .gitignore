@@ -16,3 +16,4 @@ snapshots/
 # системные файлы
 .DS_Store
 Thumbs.db
+reports/

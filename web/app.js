@@ -10,6 +10,7 @@ function h(tag, cls, html) {
 }
 
 const UI = { engine: null, user: null, page: "devices", roomId: null, floor: "floor1", eventFilter: "all",
+             energyTab: "live", report: { period: "week", from: null, to: null }, reportTicks: 0,
              unread: 0, cards: {}, timer: null, sheetLive: null, sheetDeviceId: null };
 
 // ---------- запуск ----------
@@ -95,8 +96,9 @@ function renderRoomTabs() {
   const tabs = $("#roomTabs");
   tabs.innerHTML = "";
   [{ id: null, name: "Умный дом" }].concat(home().rooms).forEach(r => {
-    const b = h("button", r.id === UI.roomId ? "active" : "", esc(r.name));
-    b.addEventListener("click", () => { UI.roomId = r.id; renderRoomTabs(); if (UI.page === "plan") { const z = r.id !== null ? roomZone(r.name) : null; if (z) UI.floor = z[0]; } renderPage(); });
+    const label = r.id === null ? "Умный дом" : `${esc(r.name)} <small>· ${FLOOR_SHORT[r.floor] || ""}</small>`;
+    const b = h("button", r.id === UI.roomId ? "active" : "", label);
+    b.addEventListener("click", () => { UI.roomId = r.id; renderRoomTabs(); if (r.id !== null) UI.floor = r.floor; renderPage(); });
     tabs.appendChild(b);
   });
 }
@@ -293,31 +295,68 @@ function openUserMenu() {
   body.appendChild(list);
 }
 
+function floorChips(current, onPick) {
+  const wrap = h("div", "chips");
+  D.floors.forEach(([code, name]) => {
+    const b = h("button", "chip" + (code === current ? " active" : ""), name);
+    b.addEventListener("click", () => { wrap.querySelectorAll(".chip").forEach(x => x.classList.toggle("active", x === b)); onPick(code); });
+    wrap.appendChild(b);
+  });
+  return wrap;
+}
+
+function createRoom(name, floor) {
+  const room = { id: home().nextId++, name, floor };
+  home().rooms.push(room);
+  UI.engine.roomTemps[room.id] = roomBaselineTemp(UI.engine.simMinutes);
+  UI.engine.log("device", "🚪", `Добавлена комната «${name}» (${FLOOR_NAMES[floor]})`);
+  Store.save();
+  return room;
+}
+
 function openRoomsMenu() {
   const body = openSheet("Комнаты");
   const add = h("div", "card stack");
-  add.innerHTML = `<div class="section-title" style="margin:0">Новая комната</div><input placeholder="Название комнаты" maxlength="30"><div class="error"></div>`;
-  const btn = h("button", "btn primary", "Добавить комнату");
+  const cur = home().rooms.find(r => r.id === UI.roomId);
+  let floor = cur ? cur.floor : UI.floor;
+  add.innerHTML = `<div class="section-title" style="margin:0">Новая комната</div><input placeholder="Название, например «Детская»" maxlength="30">
+    <div class="muted">На каком этаже?</div>`;
+  const hint = h("div", "muted");
+  const paintHint = () => { hint.textContent = `📍 Комната появится во вкладках с пометкой «${FLOOR_SHORT[floor]}», а её устройства — на плане «${FLOOR_NAMES[floor]}»`; };
+  add.appendChild(floorChips(floor, f => { floor = f; paintHint(); }));
+  paintHint();
+  add.appendChild(hint);
+  add.appendChild(h("div", "error"));
+  const btn = h("button", "btn primary", "Создать комнату");
   add.appendChild(btn);
   btn.addEventListener("click", () => {
     const name = add.querySelector("input").value.trim();
-    if (!name) return;
+    if (!name) { add.querySelector(".error").textContent = "Введите название комнаты"; return; }
     if (home().rooms.some(r => r.name.toLowerCase() === name.toLowerCase())) { add.querySelector(".error").textContent = "Такая комната уже есть"; return; }
-    const room = { id: home().nextId++, name };
-    home().rooms.push(room);
-    UI.engine.roomTemps[room.id] = roomBaselineTemp(UI.engine.simMinutes);
-    Store.save();
+    const room = createRoom(name, floor);
     UI.roomId = room.id;
+    UI.floor = room.floor;
     renderRoomTabs();
     closeSheet();
   });
   body.appendChild(add);
   const list = h("div", "card stack");
-  list.innerHTML = `<div class="section-title" style="margin:0">Удалить комнату</div>`;
+  list.innerHTML = `<div class="section-title" style="margin:0">Мои комнаты</div><div class="muted">Этаж можно поменять — устройства комнаты переедут на план этого этажа.</div>`;
   home().rooms.forEach(r => {
     const count = home().devices.filter(d => d.roomId === r.id).length;
-    const row = h("div", "row", `<span>${esc(r.name)} <span class="muted">· устройств: ${count}</span></span>`);
-    const del = h("button", "btn danger", "Удалить");
+    const row = h("div", "row", `<span style="flex:1">${esc(r.name)} <span class="muted">· устройств: ${count}</span></span>`);
+    const sel = h("select");
+    sel.style.cssText = "width:auto;padding:6px 8px;font-size:14px";
+    sel.innerHTML = D.floors.map(([code, name]) => `<option value="${code}" ${code === r.floor ? "selected" : ""}>${name}</option>`).join("");
+    sel.addEventListener("change", () => {
+      r.floor = sel.value;
+      home().devices.forEach(d => { if (d.roomId === r.id) delete d.s.plan; });
+      UI.engine.log("device", "🏢", `Комната «${r.name}» перенесена: ${FLOOR_NAMES[r.floor]}`);
+      Store.save();
+      renderRoomTabs();
+    });
+    row.appendChild(sel);
+    const del = h("button", "btn danger", "✕");
     del.style.padding = "8px 12px";
     del.addEventListener("click", () => {
       if (!confirm(`Удалить комнату «${r.name}»?${count ? `\nВместе с ней будут удалены устройства: ${count}.` : ""}`)) return;
@@ -388,16 +427,44 @@ function openModels(typeCode, query) {
 function openAddForm(modelCode, query) {
   const m = MODELS[modelCode], t = TYPES[m.type];
   const body = openSheet(m.name, { dark: true, back: () => openModels(m.type, query) });
+  const cur = home().rooms.find(r => r.id === UI.roomId) || home().rooms[0];
+  let floor = cur ? cur.floor : "floor1";
   body.innerHTML = `<div style="text-align:center;font-size:64px">${t.icon}</div>
     <div style="text-align:center" class="hint-dark">${esc(t.name)} · ${modelPowerText(m)}</div>
     <div class="hint-dark">Название устройства</div><input id="newName" maxlength="40" value="${esc(t.name)}">
-    <div class="hint-dark">Комната</div><select id="newRoom">${home().rooms.map(r => `<option value="${r.id}" ${r.id === UI.roomId ? "selected" : ""}>${esc(r.name)}</option>`).join("")}</select>
+    <div class="hint-dark">Этаж</div><div id="floorPick"></div>
+    <div class="hint-dark">Комната на этом этаже</div>
+    <div class="row"><select id="newRoom" style="flex:1"></select><button class="btn" id="newRoomBtn" style="flex:none;background:#2c2d31;color:#f2f2f2;border:none">+ Комната</button></div>
+    <div id="placeHint" style="color:#9fe0c2;font-size:13px"></div>
     <div class="error" id="newErr"></div>`;
+  const fillRooms = selectId => {
+    const rooms = home().rooms.filter(r => r.floor === floor);
+    $("#newRoom").innerHTML = rooms.map(r => `<option value="${r.id}" ${r.id === selectId ? "selected" : ""}>${esc(r.name)}</option>`).join("");
+    paintHint();
+  };
+  const paintHint = () => {
+    const sel = $("#newRoom");
+    $("#placeHint").textContent = sel.value
+      ? `📍 Устройство появится на плане «${FLOOR_NAMES[floor]}» в комнате «${sel.options[sel.selectedIndex].text}»`
+      : `На этаже «${FLOOR_NAMES[floor]}» пока нет комнат — создайте её кнопкой «+ Комната»`;
+  };
+  const chipsEl = floorChips(floor, f => { floor = f; fillRooms(); });
+  $("#floorPick").appendChild(chipsEl);
+  fillRooms(cur ? cur.id : null);
+  $("#newRoom").addEventListener("change", paintHint);
+  $("#newRoomBtn").addEventListener("click", () => {
+    const name = (prompt(`Название новой комнаты (${FLOOR_NAMES[floor]}):`) || "").trim().slice(0, 30);
+    if (!name) return;
+    if (home().rooms.some(r => r.name.toLowerCase() === name.toLowerCase())) { $("#newErr").textContent = "Такая комната уже есть"; return; }
+    const room = createRoom(name, floor);
+    renderRoomTabs();
+    fillRooms(room.id);
+  });
   const btn = h("button", "btn primary block", "Добавить устройство");
   btn.addEventListener("click", () => {
     const name = $("#newName").value.trim();
     if (!name) { $("#newErr").textContent = "Введите название"; return; }
-    if (!home().rooms.length) { $("#newErr").textContent = "Сначала добавьте комнату"; return; }
+    if (!$("#newRoom").value) { $("#newErr").textContent = "На этом этаже нет комнат — создайте комнату"; return; }
     const d = addDevice(home(), Number($("#newRoom").value), modelCode, name);
     Store.save();
     UI.engine.log("device", "➕", `Добавлено устройство: ${d.name} (${UI.engine.roomName(d.roomId)})`, true);
@@ -708,8 +775,9 @@ function planGlow(d) {
 
 function devicePlanPos(d, index) {
   if (d.s.plan) return [d.s.plan.floor, d.s.plan.x, d.s.plan.y];
-  const [floor, x, y] = roomZone(UI.engine.roomName(d.roomId));
-  return [floor, x + ((index % 4) - 1.5) * 0.045, y + Math.floor(index / 4) * 0.06 - 0.03];
+  const room = UI.engine.room(d.roomId) || { id: 0, name: "", floor: "floor1" };
+  const [x, y] = roomPlanPosition(room);
+  return [room.floor, x + ((index % 4) - 1.5) * 0.045, y + Math.floor(index / 4) * 0.06 - 0.03];
 }
 
 function pagePlan(c) {
@@ -782,6 +850,20 @@ function updatePlanMarkers() {
 // ---------- энергия ----------
 
 function pageEnergy(c) {
+  const tabs = h("div", "chips");
+  tabs.style.marginBottom = "12px";
+  [["live", "⚡ Сейчас"], ["reports", "📑 Отчёты за период"]].forEach(([code, cap]) => {
+    const b = h("button", "chip" + (UI.energyTab === code ? " active" : ""), cap);
+    b.addEventListener("click", () => { UI.energyTab = code; renderPage(); });
+    tabs.appendChild(b);
+  });
+  c.appendChild(tabs);
+  const host = h("div");
+  c.appendChild(host);
+  if (UI.energyTab === "reports") pageReports(host); else pageEnergyLive(host);
+}
+
+function pageEnergyLive(c) {
   const st = UI.engine.state;
   c.innerHTML = `
     <div class="tiles4">
@@ -827,6 +909,11 @@ function pageEnergy(c) {
 }
 
 function updateEnergyPage(st) {
+  if ($("#reportForecast")) {
+    refreshLiveForecast();
+    if (++UI.reportTicks % 10 === 0) refreshReport();
+    return;
+  }
   if (!$("#tGen")) return;
   const eng = UI.engine, hm = home(), tariff = hm.tariff;
   const gen = eng.today.gen / 1000, used = Math.max(0, eng.today.gen - eng.today.exp) / 1000, bought = eng.today.imp / 1000;
@@ -886,4 +973,164 @@ function prependEvent(e) {
   if (!list || (UI.eventFilter !== "all" && UI.eventFilter !== e.cat)) return;
   if (list.firstChild && list.firstChild.classList.contains("muted")) list.innerHTML = "";
   list.insertBefore(eventRow(e), list.firstChild);
+}
+
+// ---------- отчёты за период ----------
+
+const MONTHS_SHORT = ["янв", "фев", "мар", "апр", "май", "июн", "июл", "авг", "сен", "окт", "ноя", "дек"];
+const MONTHS_FULL = ["январь", "февраль", "март", "апрель", "май", "июнь", "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь"];
+const fmtDate = d => `${String(d.getDate()).padStart(2, "0")}.${String(d.getMonth() + 1).padStart(2, "0")}.${d.getFullYear()}`;
+
+function reportRange() {
+  const today = UI.engine.simDate(), p = UI.report.period;
+  if (p === "today") return [today, today];
+  if (p === "week") return [addDays(today, -6), today];
+  if (p === "month") return [addDays(today, -29), today];
+  if (p === "year") return [addDays(today, -364), today];
+  let a = UI.report.from ? parseIso(UI.report.from) : addDays(today, -13), b = UI.report.to ? parseIso(UI.report.to) : today;
+  return a <= b ? [a, b] : [b, a];
+}
+
+function reportBuckets(start, end) {
+  const eng = UI.engine, tariff = home().tariff, days = eng.energyDays(start, end);
+  const mk = (label, title, v) => ({ label, title, gen: v[0], cons: v[1], imp: v[2], exp: v[3], cost: v[2] / 1000 * tariff });
+  if (UI.report.period === "today") {
+    const hours = {};
+    eng.history.forEach(([m, g, l, , i, e]) => { (hours[Math.floor(m / 60)] = hours[Math.floor(m / 60)] || []).push([g, l, i, e || 0]); });
+    return Object.keys(hours).map(Number).sort((a, b) => a - b).map(hr => {
+      const xs = hours[hr], avg = [0, 1, 2, 3].map(k => xs.reduce((s, x) => s + x[k], 0) / xs.length);
+      return mk(String(hr).padStart(2, "0") + ":00", `${String(hr).padStart(2, "0")}:00–${String(hr + 1).padStart(2, "0")}:00`, avg);
+    });
+  }
+  const span = Math.round((end - start) / 864e5);
+  if (span <= 62) {
+    const out = [];
+    for (let d = start; d <= end; d = addDays(d, 1)) {
+      const v = days[isoDate(d)];
+      if (v) out.push(mk(`${String(d.getDate()).padStart(2, "0")}.${String(d.getMonth() + 1).padStart(2, "0")}`, fmtDate(d), v));
+    }
+    return out;
+  }
+  const months = {};
+  Object.keys(days).sort().forEach(k => {
+    const key = k.slice(0, 7), m = months[key] || (months[key] = [0, 0, 0, 0]);
+    days[k].forEach((v, i) => { m[i] += v; });
+  });
+  return Object.keys(months).sort().map(key => {
+    const [y, mo] = key.split("-").map(Number);
+    return mk(`${MONTHS_SHORT[mo - 1]} ${String(y).slice(2)}`, `${MONTHS_FULL[mo - 1]} ${y}`, months[key]);
+  });
+}
+
+function pageReports(c) {
+  const chipsRow = h("div", "chips");
+  [["today", "Сегодня"], ["week", "Неделя"], ["month", "Месяц"], ["year", "Год"], ["custom", "Свой период"]].forEach(([code, cap]) => {
+    const b = h("button", "chip" + (UI.report.period === code ? " active" : ""), cap);
+    b.addEventListener("click", () => { UI.report.period = code; renderPage(); });
+    chipsRow.appendChild(b);
+  });
+  c.appendChild(chipsRow);
+  if (UI.report.period === "custom") {
+    const [a, b] = reportRange();
+    const dates = h("div", "row", `<input type="date" id="repFrom" value="${isoDate(a)}"><span>—</span><input type="date" id="repTo" value="${isoDate(b)}">`);
+    dates.style.margin = "10px 0 0";
+    c.appendChild(dates);
+    ["#repFrom", "#repTo"].forEach(id => $(id).addEventListener("change", () => {
+      UI.report.from = $("#repFrom").value || null; UI.report.to = $("#repTo").value || null; refreshReport();
+    }));
+  }
+  c.insertAdjacentHTML("beforeend", `
+    <div class="summary" id="repPeriod"></div>
+    <div class="card" id="reportForecast">
+      <div class="section-title">🧾 Прогноз оплаты за электроэнергию</div>
+      <div id="fcValue" style="font-size:24px;font-weight:800;color:#12293c"></div>
+      <div class="muted" id="fcText" style="margin-top:4px"></div>
+      <div id="fcLive" style="font-size:13px;color:#3f5e75;margin-top:8px"></div>
+    </div>
+    <div class="tiles4" style="margin-top:12px">
+      <div class="card stat"><div class="t">💳 К оплате за сеть</div><div class="v" id="rPay"></div><div class="s" id="rPayS"></div></div>
+      <div class="card stat"><div class="t">🔌 Взято из сети</div><div class="v" id="rGrid"></div><div class="s" id="rGridS"></div></div>
+      <div class="card stat"><div class="t">💰 Сэкономлено солнцем</div><div class="v" id="rSaved" style="color:#00b96b"></div><div class="s">солнце + аккумулятор</div></div>
+      <div class="card stat"><div class="t">☀️ Выработали панели</div><div class="v" id="rGen" style="color:#c98a00"></div><div class="s" id="rCons"></div></div>
+    </div>
+    <div class="card" style="margin-top:12px"><div class="section-title" id="rChartTitle"></div><div id="rChart"></div></div>
+    <div class="card" style="margin-top:12px"><div class="section-title">💳 Счёт за период</div><div id="rBill"></div></div>
+    <div class="card" style="margin-top:12px"><div class="row"><div class="section-title" style="margin:0">📋 Детализация</div>
+      <button class="btn" id="rCsv" style="padding:8px 12px">⬇ CSV</button></div>
+      <div style="overflow-x:auto;margin-top:8px"><table class="rtable" id="rTable"></table></div></div>`);
+  UI.reportChart = new ReportChart($("#rChart"));
+  $("#rCsv").addEventListener("click", exportReportCsv);
+  refreshReport();
+}
+
+function refreshReport() {
+  if (!$("#reportForecast")) return;
+  const [start, end] = reportRange(), tariff = home().tariff, eng = UI.engine;
+  const days = Object.values(eng.energyDays(start, end));
+  const sum = k => days.reduce((s, v) => s + v[k], 0);
+  const gen = sum(0), cons = sum(1), imp = sum(2), exp = sum(3), n = Math.round((end - start) / 864e5) + 1;
+  UI.reportRows = reportBuckets(start, end);
+  $("#repPeriod").textContent = `Период: ${fmtDate(start)} — ${fmtDate(end)} (${n} ${plural(n, "день", "дня", "дней")}) · сегодня — данные симуляции, прошлые дни — смоделированная история`;
+  $("#rPay").textContent = formatMoney(imp / 1000 * tariff); $("#rPay").style.color = imp > 1 ? "#e5484d" : "";
+  $("#rPayS").textContent = `по тарифу ${tariff} ₸/кВт·ч`;
+  $("#rGrid").textContent = kwhText(imp); $("#rGridS").textContent = cons ? `${Math.round(imp / cons * 100)}% потребления` : "";
+  $("#rSaved").textContent = formatMoney(Math.max(0, cons - imp) / 1000 * tariff);
+  $("#rGen").textContent = kwhText(gen); $("#rCons").textContent = `дом потребил ${kwhText(cons)}`;
+  const kind = UI.report.period === "today" ? "по часам" : n <= 62 ? "по дням" : "по месяцам";
+  $("#rChartTitle").textContent = "📊 Потребление и выработка " + kind;
+  UI.reportChart.setData(UI.reportRows);
+  const selfPct = cons ? Math.round((cons - imp) / cons * 100) : 0;
+  $("#rBill").innerHTML = [
+    ["🔌 Из сети", kwhText(imp, 2)], ["× Тариф", tariff + " ₸/кВт·ч"],
+    ["= К оплате", `<span style="color:#e5484d">${formatMoney(imp / 1000 * tariff)}</span>`],
+    ["Без панелей заплатили бы", formatMoney(cons / 1000 * tariff)],
+    ["💰 Экономия", `<span style="color:#00b96b">${formatMoney(Math.max(0, cons - imp) / 1000 * tariff)} (${selfPct}%)</span>`],
+    ["☀️ Самообеспеченность", selfPct + "%"], ["↗ Отдано в сеть", kwhText(exp)],
+    ["🌱 CO₂ не выброшено", (gen / 1000 * C.CO2_KG_PER_KWH).toFixed(1).replace(".", ",") + " кг"],
+  ].map(([k, v]) => `<div class="kv"><span class="muted">${k}</span><b>${v}</b></div>`).join("");
+  const rows = UI.reportRows, tot = ["gen", "cons", "imp", "exp", "cost"].reduce((o, k) => (o[k] = rows.reduce((s, x) => s + x[k], 0), o), { title: "Итого" });
+  const num = v => (v / 1000).toFixed(2).replace(".", ",");
+  $("#rTable").innerHTML = `<tr><th>Период</th><th>Выработка</th><th>Потребление</th><th>Из сети</th><th>В сеть</th><th>К оплате</th></tr>` +
+    rows.concat([tot]).map((x, i) => `<tr class="${i === rows.length ? "total" : ""}"><td>${esc(x.title)}</td><td>${num(x.gen)}</td><td>${num(x.cons)}</td>
+      <td class="${x.imp > 1 ? "red" : ""}">${num(x.imp)}</td><td>${num(x.exp)}</td><td>${formatMoney(x.cost)}</td></tr>`).join("");
+  refreshForecast();
+}
+
+function refreshForecast() {
+  const eng = UI.engine, tariff = home().tariff, today = eng.simDate();
+  const monthStart = new Date(today.getFullYear(), today.getMonth(), 1);
+  const daysInMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0).getDate();
+  const mtd = Object.values(eng.energyDays(monthStart, today));
+  const recent = Object.values(eng.energyDays(addDays(today, -14), addDays(today, -1)));
+  const src = recent.length ? recent : mtd;
+  const mtdImp = mtd.reduce((s, v) => s + v[2], 0), mtdCons = mtd.reduce((s, v) => s + v[1], 0);
+  const avgImp = src.reduce((s, v) => s + v[2], 0) / Math.max(1, src.length), avgCons = src.reduce((s, v) => s + v[1], 0) / Math.max(1, src.length);
+  const left = daysInMonth - today.getDate();
+  $("#fcValue").textContent = `≈ ${formatMoney((mtdImp + avgImp * left) / 1000 * tariff)} за ${MONTHS_FULL[today.getMonth()]}`;
+  $("#fcText").innerHTML = `Уже взято из сети с 1 ${MONTHS_SHORT[today.getMonth()]}.: <b>${kwhText(mtdImp)}</b> (${formatMoney(mtdImp / 1000 * tariff)}). ` +
+    `Средний расход из сети за последние дни — <b>${kwhText(avgImp)}</b> в сутки, до конца месяца ${left} ${plural(left, "день", "дня", "дней")}. ` +
+    `Без солнечных панелей счёт был бы ≈ <b>${formatMoney((mtdCons + avgCons * left) / 1000 * tariff)}</b>.`;
+  refreshLiveForecast();
+}
+
+function refreshLiveForecast() {
+  const st = UI.engine.state, el = $("#fcLive");
+  if (!st || !el) return;
+  const tariff = home().tariff, load = st.load;
+  el.textContent = `⚡ Сейчас дом потребляет ${formatPower(load)}: сутки при такой нагрузке без солнца стоили бы ≈ ${formatMoney(load * 24 / 1000 * tariff)}, ` +
+    `месяц ≈ ${formatMoney(load * 720 / 1000 * tariff)}. ` +
+    (st.gridImport > 1 ? `Прямо сейчас из сети берётся ${formatPower(st.gridImport)} — это ≈ ${formatMoney(st.gridImport / 1000 * tariff)} в час.`
+                       : "Сейчас дом не берёт энергию из сети — платить не нужно.");
+}
+
+function exportReportCsv() {
+  const [start, end] = reportRange();
+  const lines = ["Период;Выработка, кВт·ч;Потребление, кВт·ч;Из сети, кВт·ч;В сеть, кВт·ч;К оплате, тенге"];
+  (UI.reportRows || []).forEach(x => lines.push([x.title, ...["gen", "cons", "imp", "exp"].map(k => (x[k] / 1000).toFixed(3).replace(".", ",")), Math.round(x.cost)].join(";")));
+  const blob = new Blob(["﻿" + lines.join("\n")], { type: "text/csv;charset=utf-8" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `energy_${isoDate(start)}_${isoDate(end)}.csv`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
 }

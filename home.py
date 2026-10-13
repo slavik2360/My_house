@@ -7,7 +7,7 @@ import random
 import hashlib
 import secrets
 import sqlite3
-from datetime import datetime
+from datetime import datetime, date, timedelta
 
 import PyQt5
 _QT5_PLUGINS_DIR = os.path.join(os.path.dirname(PyQt5.__file__), "Qt5", "plugins")
@@ -56,6 +56,11 @@ AUTO_LOGIN_USER = "Вячеслав"
 # Учётные записи, которые создаются при первом запуске
 DEFAULT_USERS = ["Вячеслав", "Иван", "Николай"]
 DEFAULT_PASSWORD = "1234"
+
+# Этажи дома: код, название, короткая подпись во вкладке комнаты
+FLOORS = [("floor1", "1 этаж", "1 эт."), ("floor2", "2 этаж", "2 эт."), ("site", "Участок", "участок")]
+FLOOR_NAMES = {code: name for code, name, _ in FLOORS}
+FLOOR_SHORT = {code: short for code, _, short in FLOORS}
 
 # Комнаты, которые получает каждый новый пользователь (по планировке 1floor.png)
 DEFAULT_ROOMS = ["Гостиная", "Спальня", "Кухня", "Прихожая", "Гараж", "Терраса"]
@@ -697,6 +702,48 @@ ECO_SHED_TYPES = ["ev_charger", "water_heater", "heater", "dishwasher", "washer"
 SOLAR_ONLY_MIN_LEVEL = 0.50  # излишки идут устройствам, только когда АКБ заряжена хотя бы наполовину
 EV_MIN_POWER = 6 * GRID_VOLTAGE  # зарядка авто не может работать на токе меньше 6 А
 
+# ---------- история энергии для отчётов ----------
+
+ENERGY_HISTORY_START = date(2025, 1, 1)
+
+
+def synthetic_energy_history(user_id, devices_count, until):
+    """
+    Правдоподобная суточная история энергосистемы с ENERGY_HISTORY_START по until включительно:
+    {дата: (выработка, потребление, из сети, в сеть) в Вт·ч}. Реальных измерений у учебного дома нет,
+    поэтому дни моделируются: летом солнца больше, зимой - отопление, облачность меняется день ото дня,
+    аккумулятор переносит заряд из дня в ночь. Ряд детерминирован - при каждом запуске он один и тот же.
+    """
+    rng = random.Random(f"energy-history-{user_id}")
+    battery = BATTERY_CAPACITY_WH * 0.6
+    reserve = BATTERY_CAPACITY_WH * BATTERY_RESERVE
+    cloud = 0.3
+    result = {}
+    day = ENERGY_HISTORY_START
+    while day <= until:
+        doy = day.timetuple().tm_yday
+        summer = 0.5 + 0.5 * math.cos(2 * math.pi * (doy - 172) / 365)  # 1 - середина лета, 0 - середина зимы
+        cloud = min(0.95, max(0.0, 0.55 * cloud + 0.45 * rng.random() * (1.15 - 0.45 * summer)))
+        sun_hours = 1.6 + 4.2 * summer                                   # пиковые солнечные часы за день
+        generated = SOLAR_PEAK_W * sun_hours * (1 - 0.75 * cloud)
+        base = 5500 + 180 * devices_count                                # освещение, техника, холодильник...
+        heating = (1 - summer) ** 1.5 * 9000                             # обогрев зимой
+        cooling = max(0.0, summer - 0.6) / 0.4 * 4000                    # кондиционер летом
+        weekend = 1.12 if day.weekday() >= 5 else 1.0
+        consumed = (base + heating + cooling) * weekend * rng.uniform(0.85, 1.15)
+        # днём солнце питает дом напрямую, излишек - в АКБ, остальное в сеть; ночью дом живёт от АКБ
+        daytime = consumed * 0.45
+        direct = min(generated, daytime)
+        surplus = generated - direct
+        charge = min(surplus, BATTERY_CAPACITY_WH - battery)
+        battery += charge
+        need = (daytime - direct) + (consumed - daytime)
+        from_battery = min(need, max(0.0, battery - reserve))
+        battery -= from_battery
+        result[day] = (generated, consumed, need - from_battery, surplus - charge)
+        day += timedelta(days=1)
+    return result
+
 
 # Ускорение нагрева чайника относительно реального времени - чтобы на демонстрации
 # литр воды закипал примерно за полминуты, а не за 3 минуты
@@ -784,7 +831,19 @@ class Database:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                 name TEXT NOT NULL,
-                position INTEGER NOT NULL DEFAULT 0
+                position INTEGER NOT NULL DEFAULT 0,
+                floor TEXT NOT NULL DEFAULT 'floor1'
+            );
+
+            CREATE TABLE IF NOT EXISTS energy_days (
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                day TEXT NOT NULL,
+                generated_wh REAL NOT NULL,
+                consumed_wh REAL NOT NULL,
+                import_wh REAL NOT NULL,
+                export_wh REAL NOT NULL,
+                simulated INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (user_id, day)
             );
 
             CREATE TABLE IF NOT EXISTS events (
@@ -827,6 +886,12 @@ class Database:
         for column, ddl in self.USER_COLUMNS.items():
             if column not in existing:
                 self.conn.execute(f"ALTER TABLE users ADD COLUMN {column} {ddl}")
+        # у комнат появился этаж: для старых комнат определяем его по названию
+        room_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(rooms)")}
+        if "floor" not in room_columns:
+            self.conn.execute("ALTER TABLE rooms ADD COLUMN floor TEXT NOT NULL DEFAULT 'floor1'")
+            for room in self.conn.execute("SELECT id, name FROM rooms").fetchall():
+                self.conn.execute("UPDATE rooms SET floor = ? WHERE id = ?", (room_zone(room["name"])[0], room["id"]))
         self.conn.commit()
 
     SEED_VERSION = 1
@@ -876,7 +941,8 @@ class Database:
         user_id = cur.lastrowid
         for position, room_name in enumerate(DEFAULT_ROOMS):
             self.conn.execute(
-                "INSERT INTO rooms (user_id, name, position) VALUES (?, ?, ?)", (user_id, room_name, position)
+                "INSERT INTO rooms (user_id, name, position, floor) VALUES (?, ?, ?, ?)",
+                (user_id, room_name, position, room_zone(room_name)[0]),
             )
         self.conn.commit()
         return user_id
@@ -943,14 +1009,51 @@ class Database:
             "SELECT * FROM rooms WHERE user_id = ? ORDER BY position, id", (user_id,)
         ).fetchall()
 
-    def add_room(self, user_id, name):
+    def add_room(self, user_id, name, floor=None):
         row = self.conn.execute(
             "SELECT COALESCE(MAX(position), -1) + 1 FROM rooms WHERE user_id = ?", (user_id,)
         ).fetchone()
-        self.conn.execute(
-            "INSERT INTO rooms (user_id, name, position) VALUES (?, ?, ?)", (user_id, name, row[0])
+        cur = self.conn.execute(
+            "INSERT INTO rooms (user_id, name, position, floor) VALUES (?, ?, ?, ?)",
+            (user_id, name, row[0], floor or room_zone(name)[0]),
         )
         self.conn.commit()
+        return cur.lastrowid
+
+    def set_room_floor(self, room_id, floor):
+        self.conn.execute("UPDATE rooms SET floor = ? WHERE id = ?", (floor, room_id))
+        # своё место на плане у устройств этой комнаты сбрасываем - они переедут на новый этаж
+        for row in self.conn.execute("SELECT id, settings FROM devices WHERE room_id = ?", (room_id,)).fetchall():
+            settings = json.loads(row["settings"] or "{}")
+            if settings.pop("plan", None) is not None:
+                self.conn.execute("UPDATE devices SET settings = ? WHERE id = ?",
+                                  (json.dumps(settings, ensure_ascii=False), row["id"]))
+        self.conn.commit()
+
+    # ---------- история энергии по дням (для отчётов) ----------
+
+    def save_energy_day(self, user_id, day, generated_wh, consumed_wh, import_wh, export_wh):
+        """День, прожитый симуляцией, - заменяет сгенерированную историю за эту дату."""
+        self.conn.execute(
+            "INSERT OR REPLACE INTO energy_days VALUES (?, ?, ?, ?, ?, ?, 1)",
+            (user_id, day.isoformat(), generated_wh, consumed_wh, import_wh, export_wh),
+        )
+        self.conn.commit()
+
+    def backfill_energy_history(self, user_id, devices_count, until):
+        """Дописать недостающие прошлые дни правдоподобной историей (реальных измерений в учебном проекте нет)."""
+        rows = [(user_id, d.isoformat(), *values, 0)
+                for d, values in synthetic_energy_history(user_id, devices_count, until).items()]
+        self.conn.executemany("INSERT OR IGNORE INTO energy_days VALUES (?, ?, ?, ?, ?, ?, ?)", rows)
+        self.conn.commit()
+
+    def get_energy_days(self, user_id, start, end):
+        rows = self.conn.execute(
+            "SELECT * FROM energy_days WHERE user_id = ? AND day BETWEEN ? AND ? ORDER BY day",
+            (user_id, start.isoformat(), end.isoformat()),
+        ).fetchall()
+        return {date.fromisoformat(r["day"]): (r["generated_wh"], r["consumed_wh"], r["import_wh"], r["export_wh"])
+                for r in rows}
 
     def delete_room(self, room_id):
         self.conn.execute("DELETE FROM rooms WHERE id = ?", (room_id,))
@@ -1030,6 +1133,7 @@ class SolarSimulator(QObject):
         self.battery_wh = max(0.0, min(BATTERY_CAPACITY_WH, battery_wh))
         self.load_provider = load_provider
         now = datetime.now()
+        self.start_date = now.date()  # дата, с которой началась симуляция (день 0)
         self.sim_minutes = now.hour * 60 + now.minute + now.second / 60
         self.minutes_per_tick = SIM_SPEEDS[1][1]
         self.cloudiness = random.uniform(0.0, 0.4)
@@ -1059,11 +1163,19 @@ class SolarSimulator(QObject):
         power = SOLAR_PEAK_W * sun_height * (1 - 0.75 * self.cloudiness)
         return max(0.0, power * random.uniform(0.97, 1.03))
 
+    def sim_date(self):
+        """Текущая дата «внутри» симуляции (она уходит вперёд при ускорении времени)."""
+        return self.start_date + timedelta(days=int(self.sim_minutes // 1440))
+
     def tick(self, advance=True):
+        closed_day = None
         if advance:
             previous_day = int(self.sim_minutes // 1440)
             self.sim_minutes += self.minutes_per_tick
             if int(self.sim_minutes // 1440) != previous_day:
+                # сутки закончились - отдаём их итоги для отчётов и начинаем новые
+                closed_day = (self.start_date + timedelta(days=previous_day), self.generated_today_wh,
+                              self.consumed_today_wh, self.import_today_wh, self.export_today_wh)
                 self.generated_today_wh = 0.0
                 self.consumed_today_wh = 0.0
                 self.import_today_wh = 0.0
@@ -1113,6 +1225,8 @@ class SolarSimulator(QObject):
         self.state = {
             "time": sim_time_text(self.sim_minutes),
             "sim_minutes": self.sim_minutes,
+            "date": self.sim_date(),
+            "closed_day": closed_day,
             "advanced": advance,  # False - пересчёт без хода времени (после переключения устройства)
             "level": self.battery_wh / BATTERY_CAPACITY_WH,
             "battery_wh": self.battery_wh,
@@ -1394,6 +1508,15 @@ DARK_DIALOG_STYLE = """
         color: #f2f2f2;
     }
     QPushButton#ghost:hover { background-color: #36373c; }
+
+    QPushButton#floorChip {
+        background-color: #2c2d31;
+        color: #f2f2f2;
+        padding: 10px 14px;
+        font-weight: 600;
+    }
+    QPushButton#floorChip:checked { background-color: #00b96b; color: white; }
+    QLabel#placeHint { color: #9fe0c2; font-size: 13px; }
 
     QLineEdit, QComboBox {
         background-color: #2c2d31;
@@ -2063,10 +2186,11 @@ class AddDeviceDialog(QDialog):
         super().__init__(parent)
         self.db = db
         self.user_id = user_id
-        self.rooms = rooms
+        self.rooms = [dict(r) for r in rooms]
         self.default_room_id = default_room_id
         self.selected_type = None
         self.selected_model = None
+        self.rooms_changed = False
         self.setWindowTitle("Добавить устройство")
         self.setStyleSheet(DARK_DIALOG_STYLE)
         self.resize(660, 760)
@@ -2331,13 +2455,42 @@ class AddDeviceDialog(QDialog):
         name_caption.setObjectName("hint")
         self.name_edit = QLineEdit()
         self.name_edit.setMaxLength(40)
-        room_caption = QLabel("Комната")
+        floor_caption = QLabel("Этаж")
+        floor_caption.setObjectName("hint")
+        floor_row = QHBoxLayout()
+        floor_row.setSpacing(8)
+        self.floor_group = QButtonGroup(self)
+        self.floor_buttons = {}
+        for code, caption, _ in FLOORS:
+            btn = QPushButton(caption)
+            btn.setObjectName("floorChip")
+            btn.setCheckable(True)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.clicked.connect(lambda _, c=code: self.select_floor(c))
+            self.floor_group.addButton(btn)
+            self.floor_buttons[code] = btn
+            floor_row.addWidget(btn)
+        room_caption = QLabel("Комната на этом этаже")
         room_caption.setObjectName("hint")
+        room_row = QHBoxLayout()
         self.room_combo = QComboBox()
-        for room in self.rooms:
-            self.room_combo.addItem(room["name"], room["id"])
-        for w in (name_caption, self.name_edit, room_caption, self.room_combo):
-            layout.addWidget(w)
+        self.room_combo.currentIndexChanged.connect(self.update_place_hint)
+        new_room_btn = QPushButton("+ Новая комната")
+        new_room_btn.setObjectName("ghost")
+        new_room_btn.setCursor(Qt.PointingHandCursor)
+        new_room_btn.clicked.connect(self.create_room)
+        room_row.addWidget(self.room_combo, 1)
+        room_row.addWidget(new_room_btn)
+        self.place_hint = QLabel()
+        self.place_hint.setObjectName("placeHint")
+        self.place_hint.setWordWrap(True)
+        layout.addWidget(name_caption)
+        layout.addWidget(self.name_edit)
+        layout.addWidget(floor_caption)
+        layout.addLayout(floor_row)
+        layout.addWidget(room_caption)
+        layout.addLayout(room_row)
+        layout.addWidget(self.place_hint)
 
         self.form_error = QLabel()
         self.form_error.setStyleSheet("color: #ff6b6b;")
@@ -2365,13 +2518,49 @@ class AddDeviceDialog(QDialog):
         self.form_power.setText(f"{info['name']} · {model_power_text(model)}")
         self.name_edit.setText(info["name"])
         self.name_edit.selectAll()
-        if self.default_room_id is not None:
-            index = self.room_combo.findData(self.default_room_id)
-            if index >= 0:
-                self.room_combo.setCurrentIndex(index)
+        default = next((r for r in self.rooms if r["id"] == self.default_room_id), None)
+        self.select_floor(default["floor"] if default else (self.rooms[0]["floor"] if self.rooms else "floor1"),
+                          room_id=default["id"] if default else None)
         self.form_error.clear()
         self.stack.setCurrentIndex(self.PAGE_FORM)
         self.name_edit.setFocus()
+
+    def select_floor(self, floor, room_id=None):
+        """Выбран этаж - в списке остаются только его комнаты."""
+        self.current_floor = floor
+        self.floor_buttons[floor].setChecked(True)
+        self.room_combo.blockSignals(True)
+        self.room_combo.clear()
+        for room in self.rooms:
+            if room["floor"] == floor:
+                self.room_combo.addItem(room["name"], room["id"])
+        if room_id is not None and self.room_combo.findData(room_id) >= 0:
+            self.room_combo.setCurrentIndex(self.room_combo.findData(room_id))
+        self.room_combo.blockSignals(False)
+        self.update_place_hint()
+
+    def update_place_hint(self, *_):
+        room_name = self.room_combo.currentText()
+        if room_name:
+            self.place_hint.setText(f"📍 Устройство появится на плане «{FLOOR_NAMES[self.current_floor]}» "
+                                    f"в комнате «{room_name}»")
+        else:
+            self.place_hint.setText(f"На этаже «{FLOOR_NAMES[self.current_floor]}» пока нет комнат — "
+                                    f"создайте её кнопкой «+ Новая комната»")
+
+    def create_room(self):
+        name, ok = QInputDialog.getText(self, "Новая комната",
+                                        f"Название комнаты ({FLOOR_NAMES[self.current_floor]}):")
+        name = name.strip()[:30]
+        if not ok or not name:
+            return
+        if any(r["name"].lower() == name.lower() for r in self.rooms):
+            self.form_error.setText("Комната с таким названием уже есть")
+            return
+        room_id = self.db.add_room(self.user_id, name, self.current_floor)
+        self.rooms.append({"id": room_id, "name": name, "floor": self.current_floor})
+        self.rooms_changed = True
+        self.select_floor(self.current_floor, room_id=room_id)
 
     def save_device(self):
         name = self.name_edit.text().strip()
@@ -2379,7 +2568,7 @@ class AddDeviceDialog(QDialog):
             self.form_error.setText("Введите название устройства")
             return
         if self.room_combo.currentData() is None:
-            self.form_error.setText("Сначала добавьте хотя бы одну комнату")
+            self.form_error.setText("На этом этаже нет комнат — создайте комнату")
             return
         self.db.add_device(self.user_id, self.room_combo.currentData(), self.selected_model, name)
         self.accept()
@@ -4933,7 +5122,9 @@ ROOM_ZONES = [
     (("террас", "терас", "балкон"), "floor1", 0.76, 0.15),
     (("спальн", "детск", "кабинет"), "floor2", 0.59, 0.36),
     (("двор", "сад", "участ", "улиц"), "site", 0.5, 0.85),
+    (("ванн", "санузел", "туалет"), "floor1", 0.47, 0.6),
 ]
+FLOOR_DEFAULT_POS = {"floor1": (0.45, 0.45), "floor2": (0.5, 0.45), "site": (0.5, 0.8)}
 
 
 def room_zone(room_name):
@@ -4942,6 +5133,16 @@ def room_zone(room_name):
         if any(k in name for k in keys):
             return floor, x, y
     return "floor1", 0.45, 0.45
+
+
+def room_plan_position(room_id, room_name, floor):
+    """Где на плане этажа стоят устройства комнаты (своя зона по названию или место по умолчанию)."""
+    name = room_name.lower()
+    for keys, zone_floor, x, y in ROOM_ZONES:
+        if zone_floor == floor and any(k in name for k in keys):
+            return x, y
+    x, y = FLOOR_DEFAULT_POS.get(floor, (0.5, 0.5))
+    return x + ((room_id * 37) % 5 - 2) * 0.07, y + ((room_id * 17) % 3 - 1) * 0.08
 
 
 def plan_glow_color(device):
@@ -5017,7 +5218,8 @@ class FloorPlanView(QWidget):
             if plan:
                 floor, x, y = plan["floor"], plan["x"], plan["y"]
             else:
-                floor, x, y = room_zone(d["room_name"])
+                floor = self.main.room_floor(d["room_id"])
+                x, y = room_plan_position(d["room_id"], d["room_name"], floor)
                 x += ((index % 4) - 1.5) * 0.045
                 y += (index // 4) * 0.06 - 0.03
             if floor == self.floor:
@@ -5159,10 +5361,10 @@ class FloorPlanPage(QWidget):
         self.floor_buttons[code].setChecked(True)
         self.view.update()
 
-    def set_room(self, room_id, room_name=None):
+    def set_room(self, room_id, floor=None):
         self.view.highlight_room = room_id
-        if room_name:
-            self.set_floor(room_zone(room_name)[0])
+        if floor:
+            self.set_floor(floor)
         self.view.update()
 
 
@@ -5264,7 +5466,7 @@ class EnergyChart(QWidget):
 
         if len(history) >= 2:
             area = QPainterPath(QPointF(px(history[0][0]), r.bottom()))
-            for minute, gen, load, level, _ in history:
+            for minute, gen, load, level, *_ in history:
                 area.lineTo(px(minute), py_kw(gen))
             area.lineTo(px(history[-1][0]), r.bottom())
             area.closeSubpath()
@@ -5322,7 +5524,7 @@ class EnergyChart(QWidget):
                                Qt.AlignLeft | Qt.AlignVCenter, line)
 
 
-class EnergyPage(QScrollArea):
+class EnergyLivePage(QScrollArea):
     def __init__(self, main, parent=None):
         super().__init__(parent)
         self.main = main
@@ -5496,6 +5698,493 @@ class EnergyPage(QScrollArea):
         self.chart.update()
 
 
+# ---------- отчёты за период ----------
+
+MONTHS_SHORT = ["янв", "фев", "мар", "апр", "май", "июн", "июл", "авг", "сен", "окт", "ноя", "дек"]
+MONTHS_FULL = ["январь", "февраль", "март", "апрель", "май", "июнь", "июль", "август", "сентябрь", "октябрь",
+               "ноябрь", "декабрь"]
+REPORT_PERIODS = [("today", "Сегодня"), ("week", "Неделя"), ("month", "Месяц"), ("year", "Год"), ("custom", "Свой период")]
+
+
+def kwh_text(wh, digits=1):
+    return f"{wh / 1000:,.{digits}f}".replace(",", " ").replace(".", ",") + " кВт·ч"
+
+
+class ReportChart(QWidget):
+    """Столбики потребления по дням/месяцам: часть от солнца (зелёная) и часть из сети (красная) + линия выработки."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.buckets = []
+        self.hover = None
+        self.setMouseTracking(True)
+        self.setMinimumHeight(280)
+
+    def set_data(self, buckets):
+        self.buckets = buckets
+        self.update()
+
+    def plot_rect(self):
+        return QRectF(64, 44, self.width() - 64 - 20, self.height() - 44 - 34)
+
+    def mouseMoveEvent(self, e):
+        r = self.plot_rect()
+        if self.buckets and r.contains(QPointF(e.pos())):
+            self.hover = min(len(self.buckets) - 1, int((e.pos().x() - r.left()) / (r.width() / len(self.buckets))))
+        else:
+            self.hover = None
+        self.update()
+
+    def leaveEvent(self, e):
+        self.hover = None
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        r = self.plot_rect()
+        font = QFont(self.font())
+        font.setPixelSize(11)
+        p.setFont(font)
+        # легенда
+        x = r.left()
+        for color, caption, line in ((QColor(ACCENT), "Потребление от солнца и АКБ", False),
+                                     (QColor("#e5484d"), "Потребление из сети (платно)", False),
+                                     (QColor("#f5b301"), "Выработка панелей", True)):
+            if line:
+                p.setPen(QPen(color, 3))
+                p.drawLine(QPointF(x, 14), QPointF(x + 18, 14))
+            else:
+                p.setPen(Qt.NoPen)
+                p.setBrush(color)
+                p.drawRoundedRect(QRectF(x, 8, 14, 12), 3, 3)
+            p.setPen(QColor("#3f5e75"))
+            p.drawText(QRectF(x + 22, 6, 260, 16), Qt.AlignLeft | Qt.AlignVCenter, caption)
+            x += 40 + QFontMetrics(font).horizontalAdvance(caption)
+        if not self.buckets:
+            p.setPen(QColor("#8aa0b2"))
+            p.drawText(r, Qt.AlignCenter, "Нет данных за выбранный период")
+            return
+        top = max(max(b["cons"], b["gen"]) for b in self.buckets) * 1.12 or 1000
+        unit, div = ("кВт·ч", 1000)
+
+        def y(wh):
+            return r.bottom() - wh / top * r.height()
+
+        for i in range(5):
+            v = top * i / 4
+            yy = y(v)
+            p.setPen(QPen(QColor("#e3edf4"), 1))
+            p.drawLine(QPointF(r.left(), yy), QPointF(r.right(), yy))
+            p.setPen(QColor("#8aa0b2"))
+            p.drawText(QRectF(0, yy - 8, r.left() - 8, 16), Qt.AlignRight | Qt.AlignVCenter,
+                       f"{v / div:.0f} {unit}" if top / div >= 8 else f"{v / div:.1f} {unit}")
+        n = len(self.buckets)
+        slot = r.width() / n
+        bw = max(2.0, min(34.0, slot * 0.68))
+        label_every = max(1, math.ceil(n / max(1, r.width() / 52)))
+        gen_points = []
+        for i, b in enumerate(self.buckets):
+            cx = r.left() + slot * (i + 0.5)
+            grid = min(b["imp"], b["cons"])
+            solar = max(0.0, b["cons"] - grid)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(0, 185, 107, 200 if self.hover in (None, i) else 120))
+            p.drawRect(QRectF(cx - bw / 2, y(solar), bw, r.bottom() - y(solar)))
+            p.setBrush(QColor(229, 72, 77, 220 if self.hover in (None, i) else 130))
+            p.drawRect(QRectF(cx - bw / 2, y(solar + grid), bw, y(solar) - y(solar + grid)))
+            gen_points.append(QPointF(cx, y(b["gen"])))
+            if i % label_every == 0:
+                p.setPen(QColor("#8aa0b2"))
+                p.drawText(QRectF(cx - 30, r.bottom() + 6, 60, 16), Qt.AlignCenter, b["label"])
+        p.setPen(QPen(QColor("#f5b301"), 2.5))
+        p.setBrush(Qt.NoBrush)
+        path = QPainterPath(gen_points[0])
+        for pt in gen_points[1:]:
+            path.lineTo(pt)
+        p.drawPath(path)
+        p.setBrush(QColor("#f5b301"))
+        p.setPen(Qt.NoPen)
+        if n <= 40:
+            for pt in gen_points:
+                p.drawEllipse(pt, 3, 3)
+        if self.hover is not None:
+            b = self.buckets[self.hover]
+            lines = [b["title"], f"☀️ Выработка: {kwh_text(b['gen'])}", f"🏠 Потребление: {kwh_text(b['cons'])}",
+                     f"🔌 Из сети: {kwh_text(b['imp'])}", f"💰 К оплате: {format_money(b['cost'])}"]
+            cx = r.left() + slot * (self.hover + 0.5)
+            box = QRectF(min(cx + 12, r.right() - 210), r.top() + 6, 200, 18 * len(lines) + 12)
+            p.setBrush(QColor(18, 41, 60, 235))
+            p.drawRoundedRect(box, 8, 8)
+            p.setPen(Qt.white)
+            for k, line in enumerate(lines):
+                p.drawText(QRectF(box.left() + 10, box.top() + 6 + k * 18, box.width() - 20, 18),
+                           Qt.AlignLeft | Qt.AlignVCenter, line)
+
+
+class ReportsPage(QScrollArea):
+    """Отчёты за период: солнце и сеть отдельно, счёт за электроэнергию, прогноз оплаты, таблица, CSV."""
+
+    def __init__(self, main, parent=None):
+        super().__init__(parent)
+        self.main = main
+        self.period = "week"
+        self.rows = []
+        self.setWidgetResizable(True)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        host = QWidget()
+        layout = QVBoxLayout(host)
+        layout.setContentsMargins(0, 0, 8, 0)
+        layout.setSpacing(14)
+        self.setWidget(host)
+
+        # выбор периода
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        self.period_group = QButtonGroup(self)
+        for code, caption in REPORT_PERIODS:
+            btn = QPushButton(caption)
+            btn.setObjectName("chip")
+            btn.setCheckable(True)
+            btn.setChecked(code == self.period)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.clicked.connect(lambda _, c=code: self.set_period(c))
+            self.period_group.addButton(btn)
+            row.addWidget(btn)
+        row.addSpacing(8)
+        self.date_from = QDateEdit()
+        self.date_to = QDateEdit()
+        for edit in (self.date_from, self.date_to):
+            edit.setCalendarPopup(True)
+            edit.setDisplayFormat("dd.MM.yyyy")
+            edit.dateChanged.connect(lambda *_: self.period == "custom" and self.refresh())
+        self.dash = QLabel("—")
+        row.addWidget(self.date_from)
+        row.addWidget(self.dash)
+        row.addWidget(self.date_to)
+        row.addStretch()
+        export = QPushButton("⬇ Экспорт CSV")
+        export.setObjectName("secondary")
+        export.setCursor(Qt.PointingHandCursor)
+        export.clicked.connect(self.export_csv)
+        row.addWidget(export)
+        layout.addLayout(row)
+        self.period_label = QLabel()
+        self.period_label.setObjectName("subtitle")
+        self.period_label.setWordWrap(True)
+        layout.addWidget(self.period_label)
+
+        # прогноз оплаты
+        forecast = QFrame()
+        forecast.setObjectName("card")
+        f_layout = QVBoxLayout(forecast)
+        f_layout.setContentsMargins(18, 14, 18, 14)
+        f_title = QLabel("🧾 Прогноз оплаты за электроэнергию")
+        f_title.setObjectName("sectionTitle")
+        f_layout.addWidget(f_title)
+        self.forecast_value = QLabel()
+        self.forecast_value.setStyleSheet("font-size: 26px; font-weight: 800; color: #12293c;")
+        self.forecast_value.setWordWrap(True)
+        f_layout.addWidget(self.forecast_value)
+        self.forecast_text = QLabel()
+        self.forecast_text.setObjectName("subtitle")
+        self.forecast_text.setWordWrap(True)
+        self.forecast_text.setTextFormat(Qt.RichText)
+        f_layout.addWidget(self.forecast_text)
+        self.forecast_live = QLabel()
+        self.forecast_live.setWordWrap(True)
+        self.forecast_live.setStyleSheet("font-size: 13px; color: #3f5e75;")
+        f_layout.addWidget(self.forecast_live)
+        layout.addWidget(forecast)
+
+        # итоги периода
+        tiles = QGridLayout()
+        tiles.setSpacing(12)
+        self.t_pay = StatTile("💳 К оплате за сеть")
+        self.t_grid = StatTile("🔌 Взято из сети")
+        self.t_saved = StatTile("💰 Сэкономлено солнцем")
+        self.t_gen = StatTile("☀️ Выработали панели")
+        self.t_cons = StatTile("🏠 Потребил дом")
+        for i, tile in enumerate((self.t_pay, self.t_grid, self.t_saved, self.t_gen, self.t_cons)):
+            tile.sub.setWordWrap(True)
+            tiles.addWidget(tile, i // 3, i % 3)
+        for col in range(3):
+            tiles.setColumnStretch(col, 1)
+        layout.addLayout(tiles)
+
+        chart_card = QFrame()
+        chart_card.setObjectName("card")
+        c_layout = QVBoxLayout(chart_card)
+        c_layout.setContentsMargins(18, 14, 18, 10)
+        self.chart_title = QLabel()
+        self.chart_title.setObjectName("sectionTitle")
+        c_layout.addWidget(self.chart_title)
+        self.chart = ReportChart()
+        c_layout.addWidget(self.chart)
+        layout.addWidget(chart_card)
+
+        bottom = QHBoxLayout()
+        bottom.setSpacing(12)
+        bill = QFrame()
+        bill.setObjectName("card")
+        b_layout = QVBoxLayout(bill)
+        b_layout.setContentsMargins(18, 14, 18, 14)
+        b_title = QLabel("💳 Счёт за период")
+        b_title.setObjectName("sectionTitle")
+        b_layout.addWidget(b_title)
+        self.bill_rows = {}
+        for key, caption in (("grid", "🔌 Из сети"), ("tariff", "× Тариф"), ("pay", "= К оплате"),
+                             ("nosolar", "Без панелей заплатили бы"), ("saved", "💰 Экономия"),
+                             ("self", "☀️ Самообеспеченность"), ("export", "↗ Отдано в сеть"), ("co2", "🌱 CO₂ не выброшено")):
+            row_w = StatRow(caption)
+            self.bill_rows[key] = row_w
+            b_layout.addWidget(row_w)
+        b_layout.addStretch()
+        bottom.addWidget(bill, 2)
+
+        table_card = QFrame()
+        table_card.setObjectName("card")
+        t_layout = QVBoxLayout(table_card)
+        t_layout.setContentsMargins(18, 14, 18, 14)
+        t_title = QLabel("📋 Детализация")
+        t_title.setObjectName("sectionTitle")
+        t_layout.addWidget(t_title)
+        self.table = QTableWidget(0, 6)
+        self.table.setHorizontalHeaderLabels(["Период", "Выработка, кВт·ч", "Потребление, кВт·ч", "Из сети, кВт·ч",
+                                              "В сеть, кВт·ч", "К оплате, ₸"])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setSelectionMode(QAbstractItemView.NoSelection)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.table.setMinimumHeight(300)
+        self.table.setStyleSheet("QTableWidget { background: white; border: none; gridline-color: #eef2f5; }"
+                                 "QHeaderView::section { background: #eef4f9; border: none; padding: 6px; font-weight: 600; }")
+        t_layout.addWidget(self.table)
+        bottom.addWidget(table_card, 3)
+        layout.addLayout(bottom)
+        layout.addStretch()
+
+        today = self.main.simulator.sim_date()
+        self.date_to.setDate(QDate(today.year, today.month, today.day))
+        start = today - timedelta(days=13)
+        self.date_from.setDate(QDate(start.year, start.month, start.day))
+        self.set_period(self.period)
+
+    # ---------- данные ----------
+
+    def period_range(self):
+        today = self.main.simulator.sim_date()
+        if self.period == "today":
+            return today, today
+        if self.period == "week":
+            return today - timedelta(days=6), today
+        if self.period == "month":
+            return today - timedelta(days=29), today
+        if self.period == "year":
+            return today - timedelta(days=364), today
+        a, b = self.date_from.date().toPyDate(), self.date_to.date().toPyDate()
+        return (a, b) if a <= b else (b, a)
+
+    def set_period(self, code):
+        self.period = code
+        for btn, (c, _) in zip(self.period_group.buttons(), REPORT_PERIODS):
+            btn.setChecked(c == code)
+        custom = code == "custom"
+        for w in (self.date_from, self.dash, self.date_to):
+            w.setVisible(custom)
+        self.refresh()
+
+    def buckets(self, start, end):
+        tariff = self.main.tariff
+        days = self.main.energy_days(start, end)
+        if start == end and start == self.main.simulator.sim_date():
+            # сегодня - по часам из живой симуляции
+            hours = {}
+            for minute, gen, load, level, imp, *rest in self.main.energy_history:
+                hours.setdefault(int(minute // 60), []).append((gen, load, imp, rest[0] if rest else 0.0))
+            result = []
+            for hour in range(24):
+                samples = hours.get(hour)
+                if not samples:
+                    continue
+                avg = [sum(x[k] for x in samples) / len(samples) for k in range(4)]
+                result.append({"label": f"{hour:02d}:00", "title": f"{hour:02d}:00–{hour + 1:02d}:00", "gen": avg[0],
+                               "cons": avg[1], "imp": avg[2], "exp": avg[3], "cost": avg[2] / 1000 * tariff})
+            return result
+        if (end - start).days <= 62:
+            result = []
+            d = start
+            while d <= end:
+                if d in days:
+                    g, c, i, e = days[d]
+                    result.append({"label": d.strftime("%d.%m"), "title": d.strftime("%d.%m.%Y"), "gen": g, "cons": c,
+                                   "imp": i, "exp": e, "cost": i / 1000 * tariff})
+                d += timedelta(days=1)
+            return result
+        months = {}
+        for d, (g, c, i, e) in sorted(days.items()):
+            key = (d.year, d.month)
+            m = months.setdefault(key, [0.0, 0.0, 0.0, 0.0])
+            for k, v in enumerate((g, c, i, e)):
+                m[k] += v
+        return [{"label": f"{MONTHS_SHORT[mo - 1]} {str(y)[2:]}", "title": f"{MONTHS_FULL[mo - 1].capitalize()} {y}",
+                 "gen": v[0], "cons": v[1], "imp": v[2], "exp": v[3], "cost": v[2] / 1000 * tariff}
+                for (y, mo), v in sorted(months.items())]
+
+    def refresh(self):
+        start, end = self.period_range()
+        self.rows = self.buckets(start, end)
+        tariff = self.main.tariff
+        days = self.main.energy_days(start, end)
+        gen = sum(v[0] for v in days.values())
+        cons = sum(v[1] for v in days.values())
+        imp = sum(v[2] for v in days.values())
+        exp = sum(v[3] for v in days.values())
+        n_days = (end - start).days + 1
+        self.period_label.setText(
+            f"Период: {start.strftime('%d.%m.%Y')} — {end.strftime('%d.%m.%Y')} ({n_days} "
+            f"{plural(n_days, 'день', 'дня', 'дней')}) · сегодня по данным симуляции, прошлые дни — смоделированная история"
+        )
+        self.t_gen.set(kwh_text(gen), "энергия солнца", "#c98a00")
+        self.t_cons.set(kwh_text(cons), f"в среднем {kwh_text(cons / n_days)} в день")
+        self.t_grid.set(kwh_text(imp), f"{imp / cons * 100:.0f}% потребления" if cons else "", "#e5484d" if imp > 1 else "#12293c")
+        self.t_pay.set(format_money(imp / 1000 * tariff), f"по тарифу {tariff:g} ₸/кВт·ч", "#e5484d" if imp > 1 else "#12293c")
+        self.t_saved.set(format_money(max(0.0, cons - imp) / 1000 * tariff), "солнце + аккумулятор", ACCENT)
+
+        self.bill_rows["grid"].set_value(kwh_text(imp, 2))
+        self.bill_rows["tariff"].set_value(f"{tariff:g} ₸/кВт·ч")
+        self.bill_rows["pay"].set_value(format_money(imp / 1000 * tariff), "#e5484d")
+        self.bill_rows["nosolar"].set_value(format_money(cons / 1000 * tariff))
+        saved = max(0.0, cons - imp) / 1000 * tariff
+        self.bill_rows["saved"].set_value(f"{format_money(saved)} ({(cons - imp) / cons * 100:.0f}%)" if cons else "—", ACCENT)
+        self.bill_rows["self"].set_value(f"{(cons - imp) / cons * 100:.0f}%" if cons else "—")
+        self.bill_rows["export"].set_value(kwh_text(exp))
+        self.bill_rows["co2"].set_value(f"{gen / 1000 * CO2_KG_PER_KWH:,.1f} кг".replace(",", " ").replace(".", ","))
+
+        kind = "по часам" if self.period == "today" else ("по дням" if n_days <= 62 else "по месяцам")
+        self.chart_title.setText(f"📊 Потребление и выработка {kind}")
+        self.chart.set_data(self.rows)
+
+        self.table.setRowCount(len(self.rows) + 1)
+        for i, b in enumerate(self.rows + [{"title": "Итого", "gen": sum(b["gen"] for b in self.rows),
+                                            "cons": sum(b["cons"] for b in self.rows), "imp": sum(b["imp"] for b in self.rows),
+                                            "exp": sum(b["exp"] for b in self.rows),
+                                            "cost": sum(b["cost"] for b in self.rows)}]):
+            values = [b["title"], f"{b['gen'] / 1000:.2f}", f"{b['cons'] / 1000:.2f}", f"{b['imp'] / 1000:.2f}",
+                      f"{b['exp'] / 1000:.2f}", format_money(b["cost"])]
+            for col, v in enumerate(values):
+                item = QTableWidgetItem(v.replace(".", ",") if col else v)
+                item.setTextAlignment(Qt.AlignVCenter | (Qt.AlignLeft if col == 0 else Qt.AlignRight))
+                if i == len(self.rows):
+                    f = item.font()
+                    f.setBold(True)
+                    item.setFont(f)
+                if col == 3 and b["imp"] > 1:
+                    item.setForeground(QColor("#c0392b"))
+                self.table.setItem(i, col, item)
+        self.refresh_forecast()
+
+    def refresh_forecast(self):
+        """Прогноз счёта за текущий месяц: уже взято из сети + средний расход из сети на оставшиеся дни."""
+        import calendar
+        tariff = self.main.tariff
+        today = self.main.simulator.sim_date()
+        month_start = today.replace(day=1)
+        days_in_month = calendar.monthrange(today.year, today.month)[1]
+        mtd = self.main.energy_days(month_start, today)
+        mtd_imp = sum(v[2] for v in mtd.values())
+        mtd_cons = sum(v[1] for v in mtd.values())
+        recent = self.main.energy_days(today - timedelta(days=14), today - timedelta(days=1))
+        source = recent or mtd
+        avg_imp = sum(v[2] for v in source.values()) / max(1, len(source))
+        avg_cons = sum(v[1] for v in source.values()) / max(1, len(source))
+        left = days_in_month - today.day
+        forecast_imp = mtd_imp + avg_imp * left
+        forecast_cons = mtd_cons + avg_cons * left
+        month_name = MONTHS_FULL[today.month - 1]
+        self.forecast_value.setText(f"≈ {format_money(forecast_imp / 1000 * tariff)} за {month_name}")
+        self.forecast_text.setText(
+            f"Уже взято из сети с 1 {MONTHS_SHORT[today.month - 1]}.: <b>{kwh_text(mtd_imp)}</b> "
+            f"({format_money(mtd_imp / 1000 * tariff)}). Средний расход из сети за последние дни — "
+            f"<b>{kwh_text(avg_imp)}</b> в сутки, до конца месяца {left} {plural(left, 'день', 'дня', 'дней')}. "
+            f"Без солнечных панелей счёт был бы ≈ <b>{format_money(forecast_cons / 1000 * tariff)}</b>."
+        )
+        self.refresh_live_forecast()
+
+    def refresh_live_forecast(self):
+        st = self.main.simulator.state
+        if not st:
+            return
+        tariff = self.main.tariff
+        load = st["load"]
+        grid_now = st["grid_import"]
+        self.forecast_live.setText(
+            f"⚡ Сейчас дом потребляет {format_power(load)}: сутки при такой нагрузке без солнца стоили бы "
+            f"≈ {format_money(load * 24 / 1000 * tariff)}, месяц ≈ {format_money(load * 24 * 30 / 1000 * tariff)}. "
+            + (f"Прямо сейчас из сети берётся {format_power(grid_now)} — это ≈ {format_money(grid_now / 1000 * tariff)} в час."
+               if grid_now > 1 else "Сейчас дом не берёт энергию из сети — платить не нужно.")
+        )
+
+    def export_csv(self):
+        start, end = self.period_range()
+        folder = os.path.join(APP_DIR, "reports")
+        os.makedirs(folder, exist_ok=True)
+        path = os.path.join(folder, f"energy_{start.isoformat()}_{end.isoformat()}.csv")
+        with open(path, "w", encoding="utf-8-sig") as f:
+            f.write("Период;Выработка, кВт·ч;Потребление, кВт·ч;Из сети, кВт·ч;В сеть, кВт·ч;К оплате, тенге\n")
+            for b in self.rows:
+                f.write(";".join([b["title"]] + [f"{b[k] / 1000:.3f}".replace(".", ",") for k in ("gen", "cons", "imp", "exp")]
+                                 + [f"{b['cost']:.0f}"]) + "\n")
+        self.main.toasts.show("📄", f"Отчёт сохранён: {path}", ACCENT)
+
+
+class EnergyPage(QWidget):
+    """Вкладка «Энергия»: «Сейчас» (живые данные) и «Отчёты за период»."""
+
+    def __init__(self, main, parent=None):
+        super().__init__(parent)
+        self.main = main
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        self.group = QButtonGroup(self)
+        for i, caption in enumerate(("⚡ Сейчас", "📑 Отчёты за период")):
+            btn = QPushButton(caption)
+            btn.setObjectName("chip")
+            btn.setCheckable(True)
+            btn.setChecked(i == 0)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.clicked.connect(lambda _, n=i: self.show_tab(n))
+            self.group.addButton(btn, i)
+            row.addWidget(btn)
+        row.addStretch()
+        layout.addLayout(row)
+        self.stack = QStackedWidget()
+        self.live = EnergyLivePage(main)
+        self.reports = ReportsPage(main)
+        self.stack.addWidget(self.live)
+        self.stack.addWidget(self.reports)
+        layout.addWidget(self.stack, 1)
+        self._ticks = 0
+
+    def show_tab(self, index):
+        self.stack.setCurrentIndex(index)
+        self.group.button(index).setChecked(True)
+        if index == 1:
+            self.reports.refresh()
+
+    def update_state(self, state):
+        if self.stack.currentIndex() == 0:
+            self.live.update_state(state)
+        else:
+            self.reports.refresh_live_forecast()
+            self._ticks += 1
+            if self._ticks % 10 == 0 or state.get("closed_day"):
+                self.reports.refresh()
+
+
 # ---------- журнал событий ----------
 
 class EventsPage(QWidget):
@@ -5563,6 +6252,78 @@ class EventsPage(QWidget):
 ########### ГЛАВНОЕ ОКНО ###########
 ####################################
 
+class AddRoomDialog(QDialog):
+    """Новая комната: название + этаж (1 этаж / 2 этаж / Участок)."""
+
+    def __init__(self, existing_names, default_floor="floor1", parent=None):
+        super().__init__(parent)
+        self.existing = {n.lower() for n in existing_names}
+        self.setWindowTitle("Новая комната")
+        self.setMinimumWidth(420)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 22, 24, 20)
+        layout.setSpacing(10)
+        title = QLabel("Новая комната")
+        title.setObjectName("sectionTitle")
+        layout.addWidget(title)
+        self.name_edit = QLineEdit()
+        self.name_edit.setPlaceholderText("Название, например «Детская»")
+        self.name_edit.setMaxLength(30)
+        layout.addWidget(self.name_edit)
+        caption = QLabel("На каком этаже?")
+        caption.setObjectName("subtitle")
+        layout.addWidget(caption)
+        row = QHBoxLayout()
+        self.group = QButtonGroup(self)
+        self.buttons = {}
+        for code, name, _ in FLOORS:
+            btn = QPushButton(name)
+            btn.setObjectName("chip")
+            btn.setCheckable(True)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.clicked.connect(self.update_hint)
+            self.group.addButton(btn)
+            self.buttons[code] = btn
+            row.addWidget(btn)
+        self.buttons.get(default_floor, self.buttons["floor1"]).setChecked(True)
+        layout.addLayout(row)
+        self.hint = QLabel()
+        self.hint.setObjectName("subtitle")
+        self.hint.setWordWrap(True)
+        layout.addWidget(self.hint)
+        self.error = QLabel()
+        self.error.setObjectName("error")
+        layout.addWidget(self.error)
+        buttons = QHBoxLayout()
+        cancel = QPushButton("Отмена")
+        cancel.setObjectName("secondary")
+        cancel.clicked.connect(self.reject)
+        ok = QPushButton("Создать комнату")
+        ok.clicked.connect(self.try_accept)
+        self.name_edit.returnPressed.connect(self.try_accept)
+        buttons.addWidget(cancel)
+        buttons.addWidget(ok, 2)
+        layout.addLayout(buttons)
+        self.update_hint()
+
+    def floor(self):
+        return next(code for code, btn in self.buttons.items() if btn.isChecked())
+
+    def update_hint(self, *_):
+        self.hint.setText(f"📍 Комната появится во вкладках с пометкой «{FLOOR_SHORT[self.floor()]}», "
+                          f"а её устройства — на плане «{FLOOR_NAMES[self.floor()]}»")
+
+    def try_accept(self):
+        name = self.name_edit.text().strip()
+        if not name:
+            self.error.setText("Введите название комнаты")
+        elif name.lower() in self.existing:
+            self.error.setText("Комната с таким названием уже есть")
+        else:
+            self.room_name = name
+            self.accept()
+
+
 class MainWindow(QMainWindow):
     logged_out = pyqtSignal()
 
@@ -5602,6 +6363,7 @@ class MainWindow(QMainWindow):
         self.toasts = ToastManager(self.centralWidget())
         self.reload_rooms()
         self.reload_devices()
+        self.db.backfill_energy_history(user["id"], len(self.devices), date.today() - timedelta(days=1))
 
         self.simulator.updated.connect(self.on_energy_update)
         self.solar_panel.speed_changed.connect(self.simulator.set_speed)
@@ -5676,8 +6438,7 @@ class MainWindow(QMainWindow):
         rooms_btn.setCursor(Qt.PointingHandCursor)
         rooms_btn.setPopupMode(QToolButton.InstantPopup)
         rooms_menu = QMenu(rooms_btn)
-        rooms_menu.addAction("Добавить комнату", self.add_room)
-        rooms_menu.addAction("Удалить текущую комнату", self.delete_current_room)
+        rooms_menu.aboutToShow.connect(lambda: self.fill_rooms_menu(rooms_menu))
         rooms_btn.setMenu(rooms_menu)
         tabs_row.addWidget(rooms_btn, alignment=Qt.AlignTop)
         header_layout.addLayout(tabs_row)
@@ -5770,6 +6531,33 @@ class MainWindow(QMainWindow):
 
     # ---------- данные ----------
 
+    def fill_rooms_menu(self, menu):
+        menu.clear()
+        menu.addAction("➕  Добавить комнату…", self.add_room)
+        room_id = self.current_room_id()
+        floor_menu = menu.addMenu("🏢  Этаж текущей комнаты")
+        if room_id is None:
+            floor_menu.setEnabled(False)
+            floor_menu.setTitle("🏢  Этаж комнаты (выберите вкладку комнаты)")
+        else:
+            current = self.room_floor(room_id)
+            for code, name, _ in FLOORS:
+                action = floor_menu.addAction(name, lambda c=code: self.change_room_floor(room_id, c))
+                action.setCheckable(True)
+                action.setChecked(code == current)
+        menu.addSeparator()
+        menu.addAction("🗑  Удалить текущую комнату", self.delete_current_room)
+
+    def room_floor(self, room_id):
+        return next((r["floor"] for r in self.rooms if r["id"] == room_id), "floor1")
+
+    def change_room_floor(self, room_id, floor):
+        self.db.set_room_floor(room_id, floor)
+        self.log_event("device", "🏢", f"Комната «{self.room_name(room_id)}» перенесена: {FLOOR_NAMES[floor]}")
+        self.reload_rooms(select_room_id=room_id)
+        self.reload_devices()
+        self.plan_page.set_room(room_id, floor)
+
     def reload_rooms(self, select_room_id=None):
         current_room = self.current_room_id() if select_room_id is None else select_room_id
         self.rooms = self.db.get_rooms(self.user["id"])
@@ -5779,8 +6567,9 @@ class MainWindow(QMainWindow):
         self.tab_bar.addTab("Умный дом")
         self.tab_bar.setTabData(0, None)
         for room in self.rooms:
-            index = self.tab_bar.addTab(room["name"])
+            index = self.tab_bar.addTab(f"{room['name']} · {FLOOR_SHORT.get(room['floor'], '')}")
             self.tab_bar.setTabData(index, room["id"])
+            self.tab_bar.setTabToolTip(index, f"{room['name']} — {FLOOR_NAMES.get(room['floor'], '')}")
         target = 0
         for i in range(self.tab_bar.count()):
             if self.tab_bar.tabData(i) == current_room:
@@ -5818,7 +6607,7 @@ class MainWindow(QMainWindow):
     def on_room_changed(self, *_):
         self.refresh_grid()
         room_id = self.current_room_id()
-        self.plan_page.set_room(room_id, self.room_name(room_id) if room_id is not None else None)
+        self.plan_page.set_room(room_id, self.room_floor(room_id) if room_id is not None else None)
 
     def refresh_grid(self, *_):
         while self.grid.count():
@@ -6160,7 +6949,8 @@ class MainWindow(QMainWindow):
             self.history_day = day
             self.energy_history = []
         if not self.energy_history or minute - self.energy_history[-1][0] >= 2:
-            self.energy_history.append((minute, state["generation"], state["load"], state["level"], state["grid_import"]))
+            self.energy_history.append((minute, state["generation"], state["load"], state["level"], state["grid_import"],
+                                        state["grid_export"]))
 
     # ---------- действия ----------
 
@@ -6298,7 +7088,10 @@ class MainWindow(QMainWindow):
 
     def open_add_device(self):
         dialog = AddDeviceDialog(self.db, self.user["id"], self.rooms, self.current_room_id(), self)
-        if dialog.exec_() == QDialog.Accepted:
+        accepted = dialog.exec_() == QDialog.Accepted
+        if dialog.rooms_changed:
+            self.reload_rooms()
+        if accepted:
             self.reload_devices()
             newest = max(self.devices, key=lambda d: d["id"], default=None)
             if newest is not None:
@@ -6307,16 +7100,17 @@ class MainWindow(QMainWindow):
             self.simulator.tick(advance=False)
 
     def add_room(self):
-        name, ok = QInputDialog.getText(self, "Новая комната", "Название комнаты:")
-        name = name.strip()[:30]
-        if not ok or not name:
+        current = self.current_room_id()
+        default_floor = self.room_floor(current) if current is not None else self.plan_page.view.floor
+        dialog = AddRoomDialog([r["name"] for r in self.rooms], default_floor, self)
+        if dialog.exec_() != QDialog.Accepted:
             return
-        if any(r["name"].lower() == name.lower() for r in self.rooms):
-            QMessageBox.warning(self, "Комната", "Комната с таким названием уже есть")
-            return
-        self.db.add_room(self.user["id"], name)
-        self.reload_rooms()
-        self.tab_bar.setCurrentIndex(self.tab_bar.count() - 1)
+        floor = dialog.floor()
+        room_id = self.db.add_room(self.user["id"], dialog.room_name, floor)
+        self.log_event("device", "🚪", f"Добавлена комната «{dialog.room_name}» ({FLOOR_NAMES[floor]})")
+        self.reload_rooms(select_room_id=room_id)
+        self.room_temps.setdefault(room_id, room_baseline_temp(self.simulator.sim_minutes))
+        self.on_room_changed()
 
     def delete_current_room(self):
         room_id = self.current_room_id()
@@ -6335,6 +7129,15 @@ class MainWindow(QMainWindow):
             self.reload_devices()
             self.simulator.tick(advance=False)
 
+    def energy_days(self, start, end):
+        """{дата: (выработка, потребление, из сети, в сеть)} за период; текущий день - живые цифры симуляции."""
+        days = self.db.get_energy_days(self.user["id"], start, end)
+        today = self.simulator.sim_date()
+        if start <= today <= end and self.simulator.state:
+            st = self.simulator.state
+            days[today] = (st["generated_today"], st["consumed_today"], st["import_today"], st["export_today"])
+        return days
+
     def set_eco_mode(self, enabled):
         self.eco_mode = bool(enabled)
         self.db.set_user_option(self.user["id"], "eco_mode", int(enabled))
@@ -6343,10 +7146,13 @@ class MainWindow(QMainWindow):
     def set_tariff(self, value):
         self.tariff = float(value)
         self.db.set_user_option(self.user["id"], "tariff_kzt", self.tariff)
+        self.energy_page.reports.refresh()
         if self.simulator.state:
             self.energy_page.update_state(self.simulator.state)
 
     def on_energy_update(self, state):
+        if state.get("closed_day"):
+            self.db.save_energy_day(self.user["id"], *state["closed_day"])
         if state.get("advanced"):
             minutes = self.simulator.minutes_per_tick
             for d in list(self.devices):

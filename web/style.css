@@ -199,3 +199,15 @@ input[type=range]::-moz-range-thumb { width: 22px; height: 22px; border-radius: 
 
 .menu-list { display: flex; flex-direction: column; gap: 8px; }
 .menu-list .btn { text-align: left; }
+
+/* отчёты */
+.rtable { width: 100%; border-collapse: collapse; font-size: 13px; white-space: nowrap; }
+.rtable th { text-align: right; color: var(--muted); font-weight: 600; padding: 6px 8px; background: #eef4f9; }
+.rtable td { text-align: right; padding: 6px 8px; border-bottom: 1px solid #eef2f5; font-variant-numeric: tabular-nums; }
+.rtable th:first-child, .rtable td:first-child { text-align: left; }
+.rtable td.red { color: #c0392b; }
+.rtable tr.total td { font-weight: 700; border-top: 2px solid var(--line); }
+.room-tabs small { font-weight: 500; opacity: .75; font-size: 12px; }
+input[type=date] { min-width: 0; }
+.sheet.dark .chip { background: #2c2d31; color: #f2f2f2; border-color: #3a3b40; }
+.sheet.dark .chip.active { background: var(--accent); border-color: var(--accent); color: #fff; }
