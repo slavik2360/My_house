@@ -48,6 +48,7 @@ def export_data():
         "planFloors": home.PLAN_FLOORS,
         "roomZones": home.ROOM_ZONES,
         "floors": home.FLOORS,
+        "robotInfo": home.ROBOT_INFO,
         "floorDefaultPos": home.FLOOR_DEFAULT_POS,
         "const": {
             "BATTERY_CAPACITY_WH": home.BATTERY_CAPACITY_WH, "SOLAR_PEAK_W": home.SOLAR_PEAK_W,

@@ -248,7 +248,7 @@ function deviceCard(d) {
 function updateCard(id) {
   const c = UI.cards[id], d = home().devices.find(x => x.id === id);
   if (!c || !d) return;
-  const on = d.type === "robot_vacuum" ? ["cleaning", "returning"].includes(d.s.vac_state) || d.on : !!d.on;
+  const on = ROBOT_TYPES.includes(d.type) ? ["cleaning", "returning"].includes(d.s.vac_state) || d.on : !!d.on;
   c.card.classList.toggle("on", on);
   if (c.input.checked !== !!d.on) c.input.checked = !!d.on;
   const html = deviceStatusHtml(d, UI.engine.readings[d.id]);
@@ -612,8 +612,26 @@ function openDevice(id) {
     }, v => { s.target_temp = v; d._active = true; changed(); });
     extraRefresh = () => dial.render();
   }
-  if (d.type === "robot_vacuum") {
-    new VacuumView(body, d);
+  if (d.type === "irrigation") {
+    new IrrigationView(body, eng, d);
+    const btn = h("button", "btn primary block");
+    btn.style.minHeight = "50px";
+    btn.addEventListener("click", () => { eng.setOn(d, !d.on); refresh(); });
+    body.appendChild(btn);
+    const zones = m.zones || 1;
+    slider("Полив каждой зоны", "irr_minutes", 5, 60, v => `${v} мин · всего ${v * zones} мин`, 5);
+    const total = h("div", "muted");
+    body.appendChild(h("div", "muted", `Зон: ${zones} · расход воды ≈ ${m.flow || 15} л/мин · время идёт по часам дома`));
+    body.appendChild(total);
+    extraRefresh = () => {
+      btn.textContent = d.on ? "⏹ Остановить полив" : "💦 Начать полив";
+      btn.className = d.on ? "btn block" : "btn primary block";
+      if (d.on) { btn.style.background = "#2f8de4"; btn.style.color = "#fff"; } else { btn.style.background = ""; btn.style.color = ""; }
+      total.textContent = `Всего израсходовано воды: ${Math.round(s.water_total || 0)} л`;
+    };
+  }
+  if (ROBOT_TYPES.includes(d.type)) {
+    if (d.type === "lawn_mower") new LawnMowerView(body, d); else new VacuumView(body, d);
     const row = h("div", "btn-row");
     const main = h("button", "btn primary"), homeBtn = h("button", "btn", "🏠 На базу");
     main.addEventListener("click", () => {
@@ -627,7 +645,8 @@ function openDevice(id) {
     body.appendChild(row);
     extraRefresh = () => {
       const st = s.vac_state || "docked";
-      main.textContent = { cleaning: "⏸ Пауза", paused: "▶ Продолжить", returning: "↩️ Едет на базу…", docked: "▶ Начать уборку" }[st];
+      main.textContent = { cleaning: "⏸ Пауза", paused: "▶ Продолжить", returning: "↩️ Едет на базу…",
+                           docked: d.type === "lawn_mower" ? "▶ Начать стрижку" : "▶ Начать уборку" }[st];
       main.disabled = st === "returning";
       homeBtn.disabled = !["cleaning", "paused"].includes(st);
     };
@@ -688,6 +707,7 @@ function openDevice(id) {
   }
   if (caps.includes("fan_speed")) { const lv = m.levels || 3; slider("Скорость вентилятора", "fan_speed", 1, lv, v => `${v} из ${lv}`); }
   if (caps.includes("volume")) slider("Громкость", "volume", 0, 100, v => v + "%");
+  if (caps.includes("cut_height")) slider("Высота стрижки", "cut_height", 20, 60, v => v + " мм", 5);
   if (caps.includes("current")) slider("Ток зарядки", "current", 6, m.max_current, v => `${v} А · ${(v * C.GRID_VOLTAGE / 1000).toFixed(1).replace(".", ",")} кВт`);
   if (caps.includes("load")) slider("Подключённая нагрузка", "load", 0, m.power, formatPower, 10);
   if (caps.includes("keys")) {
@@ -747,7 +767,7 @@ function openDevice(id) {
   function refresh() {
     if (power.checked !== !!d.on) power.checked = !!d.on;
     const reading = eng.readings[d.id];
-    live.innerHTML = d.on || d.type === "robot_vacuum"
+    live.innerHTML = d.on || ROBOT_TYPES.includes(d.type)
       ? `${reading ? `<b>${esc(reading)}</b> · ` : ""}Потребление сейчас: <b>≈${formatPower(devicePower(d))}</b>`
       : "<b>Выключено</b>";
     if (timerHint) {
@@ -764,7 +784,8 @@ function openDevice(id) {
 
 function planGlow(d) {
   const t = d.type, s = d.s;
-  if (t === "robot_vacuum") return ["cleaning", "returning"].includes(s.vac_state) ? [0, 185, 107] : null;
+  if (ROBOT_TYPES.includes(t)) return ["cleaning", "returning"].includes(s.vac_state) ? [0, 185, 107] : null;
+  if (t === "irrigation") return d.on ? [47, 141, 228] : null;
   if (!d.on) return null;
   if (TYPES[t].group === LIGHT_GROUP) return lightRgb(d);
   if (t === "air_conditioner") return s.mode === "Обогрев" ? [255, 122, 69] : [61, 157, 245];

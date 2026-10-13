@@ -9,6 +9,7 @@ const SENSOR_GROUP = "Датчики";
 
 const TYPES = {};
 D.groups.forEach(g => g.types.forEach(t => { TYPES[t.code] = Object.assign({}, t, { group: g.name }); }));
+const ROBOT_TYPES = ["robot_vacuum", "lawn_mower"];
 const MODELS = {};
 Object.values(D.catalog).forEach(models => models.forEach(m => { MODELS[m.code] = m; }));
 
@@ -68,11 +69,13 @@ function defaultSettings(model) {
   if (caps.includes("keys")) s.keys = new Array(model.keys || 1).fill(false);
   if (caps.includes("lock")) s.locked = true;
   Object.keys(D.boolCaps).forEach(key => {
-    if (caps.includes(key)) s[key] = ["night_vision", "motion_alerts", "auto_lock", "led", "motion_light", "recording"].includes(key);
+    if (caps.includes(key)) s[key] = ["night_vision", "motion_alerts", "auto_lock", "led", "motion_light", "recording", "rain_sensor"].includes(key);
   });
   if (model.battery) s.battery = 62 + Math.floor(Math.random() * 39);
   if (t === "kettle") { s.water_ml = 1000; s.water_temp = C.ROOM_TEMP; }
-  if (t === "robot_vacuum") Object.assign(s, { vac_state: "docked", vac_progress: 0, vac_battery: 100, vac_return: 0 });
+  if (ROBOT_TYPES.includes(t)) Object.assign(s, { vac_state: "docked", vac_progress: 0, vac_battery: 100, vac_return: 0 });
+  if (t === "lawn_mower") s.cut_height = 40;
+  if (t === "irrigation") Object.assign(s, { irr_minutes: 10, irr_elapsed: 0, irr_water: 0, moisture: 35, water_total: 0 });
   if (t === "washer") s.wash_elapsed = 0;
   return s;
 }
@@ -94,7 +97,7 @@ function devicePower(d, ignoreSolar) {
   if (!m) return 0;
   const s = d.s, caps = m.caps, t = d.type;
   let p = m.power;
-  if (t === "robot_vacuum") {
+  if (ROBOT_TYPES.includes(t)) {
     const st = s.vac_state || "docked";
     if (st === "cleaning" || st === "returning") return p * modeFactor(t, s.mode);
     if (st === "paused") return 3;
@@ -102,6 +105,7 @@ function devicePower(d, ignoreSolar) {
   }
   if (!d.on) return 0;
   if (s.solar_only && !ignoreSolar) return d._solar || 0;
+  if (t === "irrigation") return p;
   if (t === "washer") {
     const ph = washerPhase(washerFraction(s));
     if (ph === "Нагрев воды") return p * modeFactor(t, s.mode);
@@ -162,9 +166,18 @@ function lightRgb(d) {
 
 function deviceStatusHtml(d, reading) {
   const m = MODELS[d.model] || { caps: [] }, s = d.s, t = d.type, caps = m.caps, group = TYPES[t].group;
-  if (t === "robot_vacuum") {
+  if (t === "irrigation") {
+    const zones = m.zones || 1, per = s.irr_minutes || 10;
+    if (d.on) {
+      const el = s.irr_elapsed || 0, left = zones * per - el;
+      return `💦 Полив зоны ${Math.min(zones, Math.floor(el / per) + 1)} из ${zones} · осталось ${Math.floor(left / 60)}:${String(Math.floor(left % 60)).padStart(2, "0")}`;
+    }
+    return `💧 Влажность почвы ${Math.round(s.moisture ?? 35)}%${s.irr_water ? ` · полито ${Math.round(s.irr_water)} л` : ""}`;
+  }
+  if (ROBOT_TYPES.includes(t)) {
+    const info = D.robotInfo[t];
     const st = s.vac_state || "docked", bat = "🔋 " + Math.round(s.vac_battery ?? 100) + "%";
-    if (st === "cleaning") return `🧹 Уборка ${Math.round((s.vac_progress || 0) * 100)}% · ${bat}`;
+    if (st === "cleaning") return `${info.icon} ${info.verb} ${Math.round((s.vac_progress || 0) * 100)}% · ${bat}`;
     if (st === "paused") return `⏸ Пауза ${Math.round((s.vac_progress || 0) * 100)}% · ${bat}`;
     if (st === "returning") return `↩️ Едет на базу · ${bat}`;
     return `🏠 На базе · ${bat}${(s.vac_battery ?? 100) < 99.5 ? " ⚡" : ""}`;
@@ -226,9 +239,10 @@ function roomZone(roomName) {
   }
   return ["floor1", 0.45, 0.45];
 }
-function sceneKind(roomName, model) {
+function sceneKind(roomName, model, floor) {
   if (model.outdoor) return "porch";
   const name = roomName.toLowerCase();
+  if (floor === "site") return ["террас", "терас"].some(k => name.includes(k)) ? "terrace" : "yard";
   const table = [[["террас", "терас", "балкон", "двор", "сад", "улиц"], "terrace"], [["прихож", "коридор", "холл", "вход"], "hallway"],
                  [["гараж"], "garage"], [["кух"], "kitchen"], [["спальн", "детск"], "bedroom"]];
   for (const [keys, kind] of table) if (keys.some(k => name.includes(k))) return kind;
@@ -238,7 +252,7 @@ function sceneKind(roomName, model) {
 // ---------- хранение ----------
 
 const STORE_KEY = "smarthome_v1";
-const SEED_VERSION = 1;
+const SEED_VERSION = 2; // 2: двор с газонокосилкой и поливом, устройства расставлены по плану
 
 const Store = {
   data: null,
@@ -293,7 +307,8 @@ function seedHome(home) {
   home.rooms.forEach(r => { roomByName[r.name] = r.id; });
   D.seedDevices.forEach(([room, model, name, on, settings]) => {
     if (roomByName[room] === undefined) return;
-    if (home.devices.some(d => d.roomId === roomByName[room] && d.model === model && d.name === name)) return;
+    const existing = home.devices.find(d => d.roomId === roomByName[room] && d.model === model && d.name === name);
+    if (existing) { if (settings.plan) existing.s.plan = Object.assign({}, settings.plan); return; }
     addDevice(home, roomByName[room], model, name, JSON.parse(JSON.stringify(settings)), !!on);
   });
   home.seedVersion = SEED_VERSION;
@@ -425,7 +440,9 @@ class Engine {
     const sun = Math.sin(Math.PI * (hour - 6) / 14);
     return Math.max(0, C.SOLAR_PEAK_W * sun * (1 - 0.75 * this.cloudiness) * (0.97 + Math.random() * 0.06));
   }
+  raining() { return this.cloudiness >= 0.85; }
   weather(gen) {
+    if (this.raining()) return "🌧 Дождь";
     if (gen <= 0) return "🌙 Ночь";
     if (this.cloudiness < 0.25) return "☀️ Ясно";
     if (this.cloudiness < 0.6) return "⛅ Переменная облачность";
@@ -469,7 +486,7 @@ class Engine {
     else if (discharge > 1) source = "🔋 Аккумулятор";
     this.state = { time: simTimeText(this.simMinutes), simMinutes: this.simMinutes, advanced: advance,
                    level: home.batteryWh / C.BATTERY_CAPACITY_WH, batteryWh: home.batteryWh, generation: gen, load,
-                   charge, discharge, gridImport: imp, gridExport: exp, source, weather: this.weather(gen) };
+                   charge, discharge, gridImport: imp, gridExport: exp, source, weather: this.weather(gen), raining: this.raining() };
     if (advance) this.stepAll();
     this.updateReadings(advance);
     if (this.hooks.onTick) this.hooks.onTick(this.state);
@@ -488,11 +505,15 @@ class Engine {
 
   setOn(d, on, source) {
     source = source || "user";
-    const s = d.s, t = d.type;
-    if (t === "robot_vacuum") {
+    const s = d.s, t = d.type, requested = on;
+    if (t === "irrigation" && on) {
+      if (s.rain_sensor && this.raining()) { this.log("device", "🌧", d.name + ": идёт дождь — полив отменён", true); on = false; }
+      else { s.irr_elapsed = 0; s.irr_water = 0; }
+    }
+    if (ROBOT_TYPES.includes(t)) {
       if (on) {
         if ((s.vac_battery ?? 100) < C.VAC_LOW_BATTERY + 10) {
-          this.log("device", "🪫", d.name + ": недостаточно заряда для уборки", true);
+          this.log("device", "🪫", `${d.name}: недостаточно заряда для ${D.robotInfo[t].start}`, true);
           on = false;
         } else {
           if ((s.vac_progress || 0) >= 1) s.vac_progress = 0;
@@ -511,7 +532,7 @@ class Engine {
     }
     d.on = !!on;
     if (!on) { delete s.off_at; delete s.timer_min; }
-    if (source === "user") this.log("device", on ? "🟢" : "⚪", `${on ? "Включено" : "Выключено"}: ${d.name} (${this.roomName(d.roomId)})`);
+    if (source === "user" && on === requested) this.log("device", on ? "🟢" : "⚪", `${on ? "Включено" : "Выключено"}: ${d.name} (${this.roomName(d.roomId)})`);
     Store.save();
     this.recalc();
   }
@@ -548,7 +569,8 @@ class Engine {
         if (res === "done") { this.setOn(d, false, "auto"); this.log("device", "☕", `${d.name}: вода нагрета до ${s.target_temp}°C`, true); }
         else if (res === "empty") { this.setOn(d, false, "auto"); this.log("device", "💧", `${d.name}: нет воды — нагрев отменён`, true, "#e5484d"); }
       } else if (d.type === "washer") this.washerStep(d, minutes);
-      else if (d.type === "robot_vacuum") this.vacuumStep(d, minutes);
+      else if (ROBOT_TYPES.includes(d.type)) this.vacuumStep(d, minutes);
+      else if (d.type === "irrigation") this.irrigationStep(d, minutes);
     });
     this.climateStep(minutes);
     this.allocateSolar();
@@ -586,11 +608,16 @@ class Engine {
   }
 
   vacuumStep(d, minutes) {
-    const s = d.s, st = s.vac_state || "docked", mf = modeFactor("robot_vacuum", s.mode);
+    const s = d.s, st = s.vac_state || "docked", mf = modeFactor(d.type, s.mode), info = D.robotInfo[d.type];
+    if (st === "cleaning" && d.type === "lawn_mower" && s.rain_sensor && this.raining()) {
+      s.vac_state = "returning"; s.vac_return = 0;
+      this.log("device", "🌧", `${d.name}: начался дождь — возвращается на базу`, true);
+      return;
+    }
     if (st === "cleaning") {
-      s.vac_progress = Math.min(1, (s.vac_progress || 0) + minutes / C.VAC_CLEAN_MIN);
-      s.vac_battery = Math.max(0, (s.vac_battery ?? 100) - minutes * C.VAC_DRAIN * mf);
-      if (s.vac_progress >= 1) { s.vac_state = "returning"; s.vac_return = 0; this.log("device", "🤖", `${d.name}: уборка завершена, возвращается на базу`, true); }
+      s.vac_progress = Math.min(1, (s.vac_progress || 0) + minutes / info.minutes);
+      s.vac_battery = Math.max(0, (s.vac_battery ?? 100) - minutes * info.drain * mf);
+      if (s.vac_progress >= 1) { s.vac_state = "returning"; s.vac_return = 0; this.log("device", d.type === "lawn_mower" ? "🚜" : "🤖", `${d.name}: ${info.done}, возвращается на базу`, true); }
       else if (s.vac_battery <= C.VAC_LOW_BATTERY) { s.vac_state = "returning"; s.vac_return = 0; this.log("device", "🪫", `${d.name}: низкий заряд, едет на базу`, true); }
     } else if (st === "returning") {
       s.vac_return = Math.min(1, (s.vac_return || 0) + minutes / C.VAC_RETURN_MIN);
@@ -603,6 +630,26 @@ class Engine {
       }
     } else if (st === "docked") {
       s.vac_battery = Math.min(100, (s.vac_battery ?? 100) + minutes * C.VAC_CHARGE);
+    }
+  }
+
+  irrigationStep(d, minutes) {
+    const s = d.s, m = MODELS[d.model], zones = m.zones || 1;
+    if (d.on) {
+      const water = (m.flow || 15) * minutes;
+      s.irr_elapsed = (s.irr_elapsed || 0) + minutes;
+      s.irr_water = (s.irr_water || 0) + water;
+      s.water_total = (s.water_total || 0) + water;
+      s.moisture = Math.min(90, (s.moisture ?? 35) + 0.9 * minutes / zones);
+      if (s.irr_elapsed >= zones * (s.irr_minutes || 10)) {
+        s.irr_elapsed = 0;
+        this.setOn(d, false, "auto");
+        this.log("device", "💦", `${d.name}: полив завершён, израсходовано ${Math.round(s.irr_water)} л воды`, true);
+      }
+    } else {
+      const sun = this.state.generation / C.SOLAR_PEAK_W;
+      s.moisture = Math.max(10, (s.moisture ?? 35) - (0.01 + 0.03 * sun) * minutes);
+      if (this.raining()) s.moisture = Math.min(90, s.moisture + 0.15 * minutes);
     }
   }
 
