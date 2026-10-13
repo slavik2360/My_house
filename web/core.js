@@ -205,7 +205,19 @@ function deviceStatusHtml(d, reading) {
   return parts.join(" · ");
 }
 
-// ---------- план дома и камеры ----------
+// ---------- этажи, план дома и камеры ----------
+
+const FLOOR_NAMES = {}, FLOOR_SHORT = {};
+D.floors.forEach(([code, name, short]) => { FLOOR_NAMES[code] = name; FLOOR_SHORT[code] = short; });
+
+function roomPlanPosition(room) {
+  const name = room.name.toLowerCase();
+  for (const [keys, floor, x, y] of D.roomZones) {
+    if (floor === room.floor && keys.some(k => name.includes(k))) return [x, y];
+  }
+  const [x, y] = D.floorDefaultPos[room.floor] || [0.5, 0.5];
+  return [x + ((room.id * 37) % 5 - 2) * 0.07, y + ((room.id * 17) % 3 - 1) * 0.08];
+}
 
 function roomZone(roomName) {
   const name = roomName.toLowerCase();
@@ -262,7 +274,7 @@ async function hashPassword(password, salt) {
 function newHome(userId) {
   const home = { rooms: [], devices: [], nextId: 1, batteryWh: C.BATTERY_CAPACITY_WH * 0.65, totals: { gen: 0, imp: 0, exp: 0 },
                  eco: true, tariff: C.DEFAULT_TARIFF_KZT, events: [], seedVersion: 0 };
-  D.defaultRooms.forEach(name => home.rooms.push({ id: home.nextId++, name }));
+  D.defaultRooms.forEach(name => home.rooms.push({ id: home.nextId++, name, floor: roomZone(name)[0] }));
   Store.data.homes[userId] = home;
   return home;
 }
@@ -276,7 +288,7 @@ function addDevice(home, roomId, modelCode, name, settings, on) {
 }
 
 function seedHome(home) {
-  D.seedExtraRooms.forEach(name => { if (!home.rooms.some(r => r.name === name)) home.rooms.push({ id: home.nextId++, name }); });
+  D.seedExtraRooms.forEach(name => { if (!home.rooms.some(r => r.name === name)) home.rooms.push({ id: home.nextId++, name, floor: roomZone(name)[0] }); });
   const roomByName = {};
   home.rooms.forEach(r => { roomByName[r.name] = r.id; });
   D.seedDevices.forEach(([room, model, name, on, settings]) => {
@@ -308,10 +320,60 @@ async function authenticate(username, password) {
 async function initStore() {
   Store.load();
   for (const name of D.defaultUsers) if (!findUser(name)) await createUser(name, D.defaultPassword);
+  // у комнат появился этаж: для старых данных определяем его по названию
+  Object.values(Store.data.homes).forEach(hm => hm.rooms.forEach(r => { if (!r.floor) r.floor = roomZone(r.name)[0]; }));
   const seedUser = findUser(D.seedUser);
   const home = Store.data.homes[seedUser.id];
   if ((home.seedVersion || 0) < SEED_VERSION) seedHome(home);
   Store.save();
+}
+
+// ---------- история энергии по дням (для отчётов) ----------
+
+function isoDate(d) { return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; }
+function parseIso(s) { const [y, m, d] = s.split("-").map(Number); return new Date(y, m - 1, d); }
+function addDays(d, n) { const x = new Date(d.getFullYear(), d.getMonth(), d.getDate()); x.setDate(x.getDate() + n); return x; }
+function dayOfYear(d) { return Math.round((new Date(d.getFullYear(), d.getMonth(), d.getDate()) - new Date(d.getFullYear(), 0, 0)) / 864e5); }
+function seededRandom(seedText) {
+  let h = 1779033703 ^ seedText.length;
+  for (let i = 0; i < seedText.length; i++) { h = Math.imul(h ^ seedText.charCodeAt(i), 3432918353); h = (h << 13) | (h >>> 19); }
+  let a = h >>> 0;
+  return () => { a |= 0; a = (a + 0x6D2B79F5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+}
+
+const ENERGY_HISTORY_START = new Date(2025, 0, 1);
+
+// Правдоподобная суточная история (как в настольной версии): лето - больше солнца, зима - отопление,
+// облачность меняется день ото дня, аккумулятор переносит заряд из дня в ночь. Значения в Вт·ч.
+function syntheticEnergyHistory(userId, devicesCount, until) {
+  const rnd = seededRandom("energy-history-" + userId);
+  const reserve = C.BATTERY_CAPACITY_WH * C.BATTERY_RESERVE;
+  let battery = C.BATTERY_CAPACITY_WH * 0.6, cloud = 0.3;
+  const out = {};
+  for (let d = ENERGY_HISTORY_START; d <= until; d = addDays(d, 1)) {
+    const summer = 0.5 + 0.5 * Math.cos(2 * Math.PI * (dayOfYear(d) - 172) / 365);
+    cloud = Math.min(0.95, Math.max(0, 0.55 * cloud + 0.45 * rnd() * (1.15 - 0.45 * summer)));
+    const generated = C.SOLAR_PEAK_W * (1.6 + 4.2 * summer) * (1 - 0.75 * cloud);
+    const base = 5500 + 180 * devicesCount, heating = Math.pow(1 - summer, 1.5) * 9000, cooling = Math.max(0, summer - 0.6) / 0.4 * 4000;
+    const weekend = d.getDay() === 0 || d.getDay() === 6 ? 1.12 : 1;
+    const consumed = (base + heating + cooling) * weekend * (0.85 + rnd() * 0.3);
+    const daytime = consumed * 0.45, direct = Math.min(generated, daytime), surplus = generated - direct;
+    const charge = Math.min(surplus, C.BATTERY_CAPACITY_WH - battery);
+    battery += charge;
+    const need = (daytime - direct) + (consumed - daytime), fromBattery = Math.min(need, Math.max(0, battery - reserve));
+    battery -= fromBattery;
+    out[isoDate(d)] = [generated, consumed, need - fromBattery, surplus - charge];
+  }
+  return out;
+}
+
+function backfillEnergyHistory(user, home) {
+  home.days = home.days || {};
+  const until = addDays(new Date(), -1);
+  const lastKey = isoDate(until);
+  if (home.days[lastKey]) return;
+  const series = syntheticEnergyHistory(user.id, home.devices.length, until);
+  Object.entries(series).forEach(([k, v]) => { if (!home.days[k]) home.days[k] = v.map(x => Math.round(x)); });
 }
 
 // ---------- симуляция ----------
@@ -322,7 +384,9 @@ class Engine {
     this.home = Store.data.homes[user.id];
     this.hooks = hooks; // {onEvent(ev, toast, color), onTick(state)}
     const now = new Date();
+    this.startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     this.simMinutes = now.getHours() * 60 + now.getMinutes() + now.getSeconds() / 60;
+    backfillEnergyHistory(user, this.home);
     this.minutesPerTick = 1;
     this.cloudiness = Math.random() * 0.4;
     this.today = { gen: 0, cons: 0, imp: 0, exp: 0 };
@@ -340,6 +404,17 @@ class Engine {
   }
 
   get devices() { return this.home.devices; }
+  simDate() { return addDays(this.startDate, Math.floor(this.simMinutes / 1440)); }
+  roomFloor(id) { const r = this.room(id); return r ? r.floor : "floor1"; }
+
+  // {iso-дата: [выработка, потребление, из сети, в сеть]} за период; текущий день - живые цифры
+  energyDays(start, end) {
+    const out = {}, a = isoDate(start), b = isoDate(end);
+    Object.entries(this.home.days || {}).forEach(([k, v]) => { if (k >= a && k <= b) out[k] = v; });
+    const today = isoDate(this.simDate());
+    if (today >= a && today <= b) out[today] = [this.today.gen, this.today.cons, this.today.imp, this.today.exp];
+    return out;
+  }
   room(id) { return this.home.rooms.find(r => r.id === id); }
   roomName(id) { const r = this.room(id); return r ? r.name : ""; }
   load() { return this.devices.reduce((s, d) => s + devicePower(d), 0); }
@@ -362,7 +437,12 @@ class Engine {
     if (advance) {
       const prevDay = Math.floor(this.simMinutes / 1440);
       this.simMinutes += this.minutesPerTick;
-      if (Math.floor(this.simMinutes / 1440) !== prevDay) this.today = { gen: 0, cons: 0, imp: 0, exp: 0 };
+      if (Math.floor(this.simMinutes / 1440) !== prevDay) {
+        // сутки закончились - сохраняем их итоги для отчётов
+        const t = this.today;
+        home.days[isoDate(addDays(this.startDate, prevDay))] = [t.gen, t.cons, t.imp, t.exp].map(Math.round);
+        this.today = { gen: 0, cons: 0, imp: 0, exp: 0 };
+      }
       const step = 0.04 * Math.sqrt(this.minutesPerTick);
       this.cloudiness = Math.min(0.95, Math.max(0, this.cloudiness + (Math.random() * 2 - 1) * step));
     }
@@ -618,7 +698,7 @@ class Engine {
     const st = this.state, day = Math.floor(st.simMinutes / 1440), minute = st.simMinutes % 1440;
     if (day !== this.historyDay) { this.historyDay = day; this.history = []; }
     const last = this.history[this.history.length - 1];
-    if (!last || minute - last[0] >= 2) this.history.push([minute, st.generation, st.load, st.level, st.gridImport]);
+    if (!last || minute - last[0] >= 2) this.history.push([minute, st.generation, st.load, st.level, st.gridImport, st.gridExport]);
   }
 
   updateReadings(advanced) {

@@ -47,6 +47,8 @@ def export_data():
         "seedDevices": home.SEED_DEVICES,
         "planFloors": home.PLAN_FLOORS,
         "roomZones": home.ROOM_ZONES,
+        "floors": home.FLOORS,
+        "floorDefaultPos": home.FLOOR_DEFAULT_POS,
         "const": {
             "BATTERY_CAPACITY_WH": home.BATTERY_CAPACITY_WH, "SOLAR_PEAK_W": home.SOLAR_PEAK_W,
             "MAX_CHARGE_W": home.MAX_CHARGE_W, "BASE_LOAD_W": home.BASE_LOAD_W,

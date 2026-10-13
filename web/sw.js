@@ -1,5 +1,5 @@
 // Офлайн-работа: сначала сеть (чтобы обновления приходили сразу), при её отсутствии - кэш.
-const CACHE = "smarthome-v1";
+const CACHE = "smarthome-v2";
 const SHELL = ["./", "index.html", "style.css", "data.js", "core.js", "visuals.js", "app.js", "manifest.webmanifest",
                "icons/icon-192.png", "icons/apple-touch-icon.png", "img/1floor.jpg", "img/2floor.jpg", "img/3Region.jpg"];
 

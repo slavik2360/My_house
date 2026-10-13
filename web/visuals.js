@@ -722,3 +722,68 @@ class EnergyChart extends CanvasView {
     }
   }
 }
+
+// ---------- отчёт за период ----------
+
+function kwhText(wh, digits) {
+  return (wh / 1000).toFixed(digits ?? 1).replace(".", ",").replace(/\B(?=(\d{3})+(?!\d))/g, " ") + " кВт·ч";
+}
+
+// Столбики потребления: часть от солнца/АКБ (зелёная) и из сети (красная, платная) + линия выработки
+class ReportChart extends CanvasView {
+  constructor(parent) {
+    super(parent, 270);
+    this.buckets = []; this.hover = null;
+    const pick = e => {
+      const r = this.canvas.getBoundingClientRect(), L = 52, pw = r.width - L - 12;
+      const i = Math.floor((e.clientX - r.left - L) / (pw / Math.max(1, this.buckets.length)));
+      this.hover = i >= 0 && i < this.buckets.length ? i : null;
+    };
+    this.canvas.addEventListener("pointermove", pick);
+    this.canvas.addEventListener("pointerdown", pick);
+    this.canvas.addEventListener("pointerleave", () => { this.hover = null; });
+  }
+  setData(buckets) { this.buckets = buckets; this.hover = null; }
+  draw(ctx, w, h) {
+    const L = 52, R = 12, T = 44, B = 26, pw = w - L - R, ph = h - T - B;
+    ctx.font = "11px -apple-system, sans-serif"; ctx.textBaseline = "middle";
+    let lx = 4, ly = 9;
+    [["#00b96b", "От солнца и АКБ", 0], ["#e5484d", "Из сети (платно)", 0], ["#f5b301", "Выработка", 1]].forEach(([col, cap, line]) => {
+      const iw = 24 + ctx.measureText(cap).width;
+      if (lx + iw > w) { lx = 4; ly += 16; }
+      if (line) { ctx.strokeStyle = col; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(lx, ly); ctx.lineTo(lx + 16, ly); ctx.stroke(); }
+      else { ctx.fillStyle = col; rr(ctx, lx, ly - 6, 14, 12, 3); ctx.fill(); }
+      ctx.fillStyle = "#3f5e75"; ctx.textAlign = "left"; ctx.fillText(cap, lx + 20, ly); lx += iw + 10;
+    });
+    const b = this.buckets;
+    if (!b.length) { ctx.fillStyle = "#8aa0b2"; ctx.textAlign = "center"; ctx.fillText("Нет данных за выбранный период", w / 2, T + ph / 2); return; }
+    const top = Math.max(...b.map(x => Math.max(x.cons, x.gen))) * 1.12 || 1000;
+    const Y = v => T + ph - v / top * ph;
+    for (let i = 0; i <= 4; i++) {
+      const v = top * i / 4, y = Y(v);
+      ctx.strokeStyle = "#e3edf4"; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(L, y); ctx.lineTo(L + pw, y); ctx.stroke();
+      ctx.fillStyle = "#8aa0b2"; ctx.textAlign = "right"; ctx.fillText((v / 1000).toFixed(top >= 8000 ? 0 : 1) + " кВт·ч", L - 4, y);
+    }
+    const slot = pw / b.length, bw = Math.max(2, Math.min(28, slot * 0.68)), every = Math.max(1, Math.ceil(b.length / Math.max(1, pw / 46)));
+    const pts = [];
+    b.forEach((x, i) => {
+      const cx = L + slot * (i + 0.5), grid = Math.min(x.imp, x.cons), solar = Math.max(0, x.cons - grid);
+      const dim = this.hover !== null && this.hover !== i;
+      ctx.fillStyle = `rgba(0,185,107,${dim ? 0.45 : 0.85})`; ctx.fillRect(cx - bw / 2, Y(solar), bw, T + ph - Y(solar));
+      ctx.fillStyle = `rgba(229,72,77,${dim ? 0.5 : 0.9})`; ctx.fillRect(cx - bw / 2, Y(solar + grid), bw, Y(solar) - Y(solar + grid));
+      pts.push([cx, Y(x.gen)]);
+      if (i % every === 0) { ctx.fillStyle = "#8aa0b2"; ctx.textAlign = "center"; ctx.fillText(x.label, cx, T + ph + 14); }
+    });
+    ctx.strokeStyle = "#f5b301"; ctx.lineWidth = 2.5; ctx.beginPath();
+    pts.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y))); ctx.stroke();
+    if (b.length <= 40) { ctx.fillStyle = "#f5b301"; pts.forEach(([x, y]) => { circle(ctx, x, y, 3); ctx.fill(); }); }
+    if (this.hover !== null) {
+      const x = b[this.hover], cx = L + slot * (this.hover + 0.5);
+      const lines = [x.title, "☀️ " + kwhText(x.gen), "🏠 " + kwhText(x.cons), "🔌 из сети " + kwhText(x.imp), "💳 " + formatMoney(x.cost)];
+      const bx = Math.min(Math.max(4, cx - 80), w - 168), bh = lines.length * 16 + 10;
+      ctx.fillStyle = "rgba(18,41,60,0.93)"; rr(ctx, bx, T + 2, 164, bh, 8); ctx.fill();
+      ctx.fillStyle = "#fff"; ctx.textAlign = "left";
+      lines.forEach((ln, i) => ctx.fillText(ln, bx + 8, T + 12 + i * 16));
+    }
+  }
+}
