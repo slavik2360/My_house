@@ -68,23 +68,59 @@ DEFAULT_ROOMS = ["Гостиная", "Спальня", "Кухня", "Прихо
 # Стартовый дом Вячеслава (создаётся при первом запуске): дополнительные комнаты и устройства
 # (комната, модель, название, включено, настройки). Иван и Николай начинают с пустого дома.
 SEED_USER = "Вячеслав"
-SEED_EXTRA_ROOMS = ['Ванная']
+SEED_EXTRA_ROOMS = ['Ванная', 'Двор']
+# Места на плане подобраны по планировкам: 1floor.png (1 этаж), 2floor.png (2 этаж), 3Region.png (участок)
 SEED_DEVICES = [
-    ('Гостиная', 'xiaomi_g10', 'Пылесос', 1, {"mode": "Эко", "plan": {"floor": "floor1", "x": 0.431, "y": 0.304}}),
-    ('Гостиная', 'aqara_g3', 'Видеокамера', 1, {"night_vision": True, "recording": True, "motion_alerts": True, "plan": {"floor": "floor1", "x": 0.67, "y": 0.384}}),
-    ('Гостиная', 'aqara_g4', 'Дверной звонок', 1, {"volume": 40, "motion_alerts": True, "plan": {"floor": "floor1", "x": 0.613, "y": 0.257}}),
-    ('Гостиная', 'aqara_smoke', 'Датчик дыма', 1, {"battery": 97, "plan": {"floor": "floor1", "x": 0.774, "y": 0.325}}),
-    ('Гостиная', 'midea_breezeless', 'Кондиционер', 1, {"target_temp": 27, "mode": "Вентиляция", "fan_speed": 3, "led": True, "plan": {"floor": "floor1", "x": 0.531, "y": 0.403}}),
-    ('Гостиная', 'yeelight_w3', 'Лампочка', 1, {"brightness": 80, "color_temp": 3700, "color": "#48dbfb", "plan": {"floor": "floor1", "x": 0.739, "y": 0.555}}),
-    ('Спальня', 'roborock_s8', 'Робот-пылесос', 0, {"mode": "Турбо", "vac_battery": 100.0, "plan": {"floor": "floor2", "x": 0.768, "y": 0.711}, "vac_state": "docked", "vac_progress": 0.0, "vac_return": 0.0}),
-    ('Спальня', 'aqara_g3', 'Видеокамера', 1, {"night_vision": True, "recording": True, "motion_alerts": True, "plan": {"floor": "floor2", "x": 0.715, "y": 0.243}}),
-    ('Кухня', 'mi_heater_s', 'Обогреватель', 1, {"target_temp": 26, "mode": "Эко", "child_lock": True}),
-    ('Кухня', 'mi_kettle_2pro', 'Электрический чайник', 0, {"target_temp": 60, "keep_warm": False, "led": True, "water_ml": 1700, "water_temp": 22.0, "plan": {"floor": "floor1", "x": 0.761, "y": 0.701}}),
-    ('Прихожая', 'aqara_leak', 'Датчик протечки', 1, {"battery": 93, "plan": {"floor": "floor1", "x": 0.232, "y": 0.299}}),
-    ('Гараж', 'aqara_g3', 'Видеокамера', 1, {"night_vision": False, "recording": True, "motion_alerts": True, "plan": {"floor": "floor1", "x": 0.172, "y": 0.42}}),
-    ('Терраса', 'crmcr_x1', 'Сейф', 1, {"locked": True, "battery": 92, "plan": {"floor": "floor1", "x": 0.7, "y": 0.09}}),
-    ('Терраса', 'aqara_g3', 'Видеокамера', 1, {"night_vision": True, "recording": True, "motion_alerts": True, "plan": {"floor": "floor1", "x": 0.847, "y": 0.116}}),
-    ('Ванная', 'midea_wd10', 'Стиральная машина', 0, {"mode": "Шерсть", "child_lock": True, "wash_elapsed": 0.0}),
+    ('Гостиная', 'xiaomi_g10', 'Пылесос', 1, {"mode": "Эко", "plan": {"floor": "floor1", "x": 0.43, "y": 0.47}}),
+    ('Гостиная', 'aqara_g3', 'Видеокамера', 1, {"night_vision": True, "recording": True, "motion_alerts": True,
+                                                "plan": {"floor": "floor1", "x": 0.4, "y": 0.22}}),
+    ('Гостиная', 'aqara_g4', 'Дверной звонок', 1, {"volume": 40, "motion_alerts": True,
+                                                   "plan": {"floor": "floor1", "x": 0.53, "y": 0.83}}),
+    ('Гостиная', 'aqara_smoke', 'Датчик дыма', 1, {"battery": 97, "plan": {"floor": "floor1", "x": 0.6, "y": 0.38}}),
+    ('Гостиная', 'midea_breezeless', 'Кондиционер', 1, {"target_temp": 24, "mode": "Охлаждение", "fan_speed": 3, "led": True,
+                                                       "plan": {"floor": "floor1", "x": 0.53, "y": 0.2}}),
+    ('Гостиная', 'yeelight_w3', 'Лампочка', 1, {"brightness": 80, "color_temp": 3700, "color": "#48dbfb",
+                                                "plan": {"floor": "floor1", "x": 0.75, "y": 0.42}}),
+    ('Спальня', 'roborock_s8', 'Робот-пылесос', 0, {"mode": "Турбо", "vac_battery": 100.0, "vac_state": "docked",
+                                                    "vac_progress": 0.0, "vac_return": 0.0,
+                                                    "plan": {"floor": "floor2", "x": 0.66, "y": 0.5}}),
+    ('Спальня', 'aqara_g3', 'Видеокамера', 1, {"night_vision": True, "recording": True, "motion_alerts": True,
+                                               "plan": {"floor": "floor2", "x": 0.42, "y": 0.22}}),
+    ('Кухня', 'mi_heater_s', 'Обогреватель', 1, {"target_temp": 26, "mode": "Эко", "child_lock": True,
+                                                 "plan": {"floor": "floor1", "x": 0.66, "y": 0.63}}),
+    ('Кухня', 'mi_kettle_2pro', 'Электрический чайник', 0, {"target_temp": 60, "keep_warm": False, "led": True,
+                                                            "water_ml": 1700, "water_temp": 22.0,
+                                                            "plan": {"floor": "floor1", "x": 0.74, "y": 0.75}}),
+    ('Прихожая', 'aqara_leak', 'Датчик протечки', 1, {"battery": 93, "plan": {"floor": "floor1", "x": 0.52, "y": 0.69}}),
+    ('Гараж', 'aqara_g3', 'Видеокамера', 1, {"night_vision": False, "recording": True, "motion_alerts": True,
+                                             "plan": {"floor": "floor1", "x": 0.2, "y": 0.42}}),
+    ('Терраса', 'crmcr_x1', 'Сейф', 1, {"locked": True, "battery": 92, "plan": {"floor": "floor1", "x": 0.7, "y": 0.1}}),
+    ('Терраса', 'aqara_g3', 'Видеокамера', 1, {"night_vision": True, "recording": True, "motion_alerts": True,
+                                               "plan": {"floor": "floor1", "x": 0.84, "y": 0.2}}),
+    ('Ванная', 'midea_wd10', 'Стиральная машина', 0, {"mode": "Шерсть", "child_lock": True, "wash_elapsed": 0.0,
+                                                      "plan": {"floor": "floor1", "x": 0.47, "y": 0.61}}),
+    ('Двор', 'navimow_i105', 'Газонокосилка', 0, {"mode": "Стандарт", "cut_height": 40, "rain_sensor": True,
+                                                   "plan": {"floor": "site", "x": 0.86, "y": 0.62}}),
+    ('Двор', 'rainbird_esp', 'Автополив', 0, {"irr_minutes": 10, "rain_sensor": True,
+                                               "plan": {"floor": "site", "x": 0.9, "y": 0.84}}),
+    ('Двор', 'xiaomi_aw300', 'Уличная камера', 1, {"night_vision": True, "recording": True, "motion_alerts": True,
+                                                    "plan": {"floor": "site", "x": 0.53, "y": 0.86}}),
+    ('Гостиная', 'xiaomi_q2_55', 'Телевизор', 0, {"volume": 30, "plan": {"floor": "floor1", "x": 0.47, "y": 0.37}}),
+    ('Гостиная', 'yandex_max', 'Яндекс Станция', 1, {"volume": 35, "plan": {"floor": "floor1", "x": 0.58, "y": 0.27}}),
+    ('Спальня', 'mi_bedside2', 'Ночник у кровати', 0, {"brightness": 40, "color_temp": 2900,
+                                                       "plan": {"floor": "floor2", "x": 0.5, "y": 0.25}}),
+    ('Спальня', 'mi_hum2', 'Увлажнитель', 1, {"mode": "Сон", "plan": {"floor": "floor2", "x": 0.76, "y": 0.36}}),
+    ('Спальня', 'aqara_t1', 'Датчик температуры', 1, {"battery": 88, "plan": {"floor": "floor2", "x": 0.6, "y": 0.5}}),
+    ('Кухня', 'mi_fridge_450', 'Холодильник', 1, {"target_temp": 4, "plan": {"floor": "floor1", "x": 0.81, "y": 0.6}}),
+    ('Кухня', 'mi_dish_s1', 'Посудомойка', 0, {"mode": "Эко", "plan": {"floor": "floor1", "x": 0.67, "y": 0.75}}),
+    ('Прихожая', 'aqara_u200', 'Входной замок', 1, {"locked": True, "auto_lock": True, "battery": 76,
+                                                    "plan": {"floor": "floor1", "x": 0.57, "y": 0.79}}),
+    ('Прихожая', 'aqara_p1', 'Датчик движения', 1, {"battery": 81, "plan": {"floor": "floor1", "x": 0.58, "y": 0.66}}),
+    ('Гараж', 'wallbox_pulsar', 'Зарядка электромобиля', 1, {"current": 16, "solar_only": True,
+                                                             "plan": {"floor": "floor1", "x": 0.2, "y": 0.6}}),
+    ('Гараж', 'huawei_sun2000', 'Солнечный инвертор', 1, {"plan": {"floor": "floor1", "x": 0.26, "y": 0.3}}),
+    ('Терраса', 'mi_strip', 'Гирлянда на террасе', 0, {"brightness": 70, "color": "#feca57",
+                                                        "plan": {"floor": "floor1", "x": 0.79, "y": 0.2}}),
 ]
 
 # Параметры системы альтернативного питания
@@ -171,6 +207,10 @@ DEVICE_GROUPS = [
         ("kettle", "Электрический чайник", "☕"),
         ("dishwasher", "Посудомоечная машина", "🍽️"),
     ]),
+    ("Сад и участок", [
+        ("lawn_mower", "Газонокосилка-робот", "🚜"),
+        ("irrigation", "Автополив", "💦"),
+    ]),
     ("Альтернативная энергетика", [
         ("inverter", "Солнечный инвертор", "☀️"),
         ("battery_bms", "Контроллер аккумулятора", "🔋"),
@@ -210,6 +250,7 @@ DUTY_CYCLE = {
 TYPE_MODES = {
     "washer": [("Хлопок 60°", 1.0), ("Быстрая 30 мин", 0.6), ("Деликатная", 0.5), ("Шерсть", 0.5), ("Эко 40-60", 0.4)],
     "robot_vacuum": [("Стандарт", 1.0), ("Тихий", 0.6), ("Турбо", 1.5)],
+    "lawn_mower": [("Стандарт", 1.0), ("Тихий", 0.7), ("Турбо", 1.3)],
     "floor_washer": [("Стандарт", 1.0), ("Интенсивный", 1.4), ("Самоочистка", 0.7)],
     "vacuum": [("Стандарт", 1.0), ("Эко", 0.5), ("Турбо", 1.6)],
     "air_conditioner": [("Охлаждение", 1.0), ("Обогрев", 1.1), ("Осушение", 0.6), ("Вентиляция", 0.15), ("Авто", 0.9)],
@@ -478,6 +519,21 @@ CATALOG = {
         _m("mi_dish_s1", "Xiaomi Mijia Dishwasher S1 (8 комплектов)", 1800, "mode timer child_lock", "Сушка горячим воздухом"),
         _m("midea_dish_14", "Midea Smart Dishwasher (14 комплектов)", 2000, "mode timer child_lock", "Полноразмерная, 3 корзины"),
     ],
+    "lawn_mower": [
+        _m("navimow_i105", "Segway Navimow i105E", 40, "mode cut_height rain_sensor timer",
+           "До 500 м², навигация RTK без провода", area=500),
+        _m("husqvarna_305", "Husqvarna Automower 305", 30, "mode cut_height rain_sensor timer",
+           "До 600 м², ограничительный провод", area=600),
+        _m("worx_m500", "Worx Landroid M500", 35, "mode cut_height timer", "До 500 м², стрижка у самых краёв", area=500),
+    ],
+    "irrigation": [
+        _m("gardena_wc", "Gardena Smart Water Control", 5, "irrigation rain_sensor", "1 зона, умный кран на шланг",
+           zones=1, flow=12),
+        _m("rainbird_esp", "Rain Bird ESP-TM2 (4 зоны)", 15, "irrigation rain_sensor", "4 зоны, датчик дождя",
+           zones=4, flow=18),
+        _m("hunter_hc", "Hunter Pro-HC (6 зон)", 20, "irrigation rain_sensor", "6 зон, Wi-Fi, погодная коррекция",
+           zones=6, flow=22),
+    ],
     "inverter": [
         _m("huawei_sun2000", "Huawei SUN2000-6KTL", 10, "", "Сетевой инвертор 6 кВт, 2 MPPT"),
         _m("growatt_sph6000", "Growatt SPH 6000", 12, "", "Гибридный, поддержка АКБ"),
@@ -512,6 +568,7 @@ CAP_NAMES = {
     "recording": "запись", "motion_alerts": "оповещения", "auto_lock": "автозакрытие",
     "guest_wifi": "гостевая сеть", "led": "индикатор", "motion_light": "включение по движению",
     "timer": "таймер", "scenes": "сценарии", "solar_only": "от излишков солнца",
+    "cut_height": "высота стрижки", "rain_sensor": "датчик дождя", "irrigation": "зоны полива",
 }
 
 # Переключатели-настройки: ключ -> подпись в окне управления
@@ -526,6 +583,16 @@ BOOL_CAPS = {
     "led": "Световой индикатор",
     "motion_light": "Включение по движению",
     "solar_only": "☀️ Только от излишков солнца",
+    "rain_sensor": "🌧 Пауза / отмена при дожде",
+}
+
+# Роботы с одинаковой логикой: работа по маршруту -> возврат на базу -> зарядка
+ROBOT_TYPES = {"robot_vacuum", "lawn_mower"}
+ROBOT_INFO = {
+    "robot_vacuum": {"minutes": 40, "drain": 1.4, "verb": "Уборка", "icon": "🧹", "done": "уборка завершена", "start": "уборки",
+                     "area": 18},
+    "lawn_mower": {"minutes": 60, "drain": 1.0, "verb": "Стрижка", "icon": "🌱", "done": "газон подстрижен", "start": "стрижки",
+                   "area": 450},
 }
 
 TIMER_OPTIONS = [("Нет", 0), ("15 минут", 15), ("30 минут", 30), ("1 час", 60), ("2 часа", 120), ("4 часа", 240)]
@@ -582,9 +649,14 @@ def default_settings(model):
         s["locked"] = True
     for key in BOOL_CAPS:
         if key in caps:
-            s[key] = key in ("night_vision", "motion_alerts", "auto_lock", "led", "motion_light", "recording")
-    if type_code == "robot_vacuum":
+            s[key] = key in ("night_vision", "motion_alerts", "auto_lock", "led", "motion_light", "recording",
+                             "rain_sensor")
+    if type_code in ROBOT_TYPES:
         s.update(vac_state="docked", vac_progress=0.0, vac_battery=100.0, vac_return=0.0)
+    if type_code == "lawn_mower":
+        s["cut_height"] = 40
+    if type_code == "irrigation":
+        s.update(irr_minutes=10, irr_elapsed=0.0, irr_water=0.0, moisture=35.0, water_total=0.0)
     if type_code == "washer":
         s.update(wash_elapsed=0.0)
     if model.get("battery"):
@@ -605,7 +677,7 @@ def device_power(device, ignore_solar=False):
     type_code = device["type_code"]
     power = model["power"]
 
-    if type_code == "robot_vacuum":
+    if type_code in ROBOT_TYPES:
         # робот потребляет и после выключения тумблера: едет на базу и заряжается
         state = s.get("vac_state", "docked")
         if state in ("cleaning", "returning"):
@@ -618,6 +690,8 @@ def device_power(device, ignore_solar=False):
         return 0.0
     if s.get("solar_only") and not ignore_solar:
         return device.get("_solar_power", 0.0)
+    if type_code == "irrigation":
+        return float(power)  # клапаны и насос
 
     if type_code == "washer":
         phase = washer_phase(washer_fraction(s))
@@ -894,7 +968,7 @@ class Database:
                 self.conn.execute("UPDATE rooms SET floor = ? WHERE id = ?", (room_zone(room["name"])[0], room["id"]))
         self.conn.commit()
 
-    SEED_VERSION = 1
+    SEED_VERSION = 2  # 2: двор с газонокосилкой и поливом, устройства расставлены по плану
 
     def seed_data(self):
         for username in DEFAULT_USERS:
@@ -913,10 +987,17 @@ class Database:
             if room_name not in existing_rooms:
                 self.add_room(user_id, room_name)
         rooms = {room["name"]: room["id"] for room in self.get_rooms(user_id)}
-        existing = {(d["room_name"], d["model_code"], d["name"]) for d in self.get_devices(user_id)}
+        existing = {(d["room_name"], d["model_code"], d["name"]): d for d in self.get_devices(user_id)}
         for room_name, model_code, name, is_on, settings in SEED_DEVICES:
-            if (room_name, model_code, name) in existing or room_name not in rooms:
-                continue  # уже есть (или пользователь удалил комнату) - не дублируем
+            if room_name not in rooms:
+                continue  # пользователь удалил комнату - не восстанавливаем
+            current = existing.get((room_name, model_code, name))
+            if current is not None:
+                # устройство уже есть - только ставим его на подобранное место на плане
+                if "plan" in settings:
+                    current["settings"]["plan"] = dict(settings["plan"])
+                    self.save_settings(current["id"], current["settings"])
+                continue
             device_id = self.add_device(user_id, rooms[room_name], model_code, name)
             full = default_settings(MODELS[model_code])
             full.update(settings)
@@ -1226,6 +1307,7 @@ class SolarSimulator(QObject):
             "time": sim_time_text(self.sim_minutes),
             "sim_minutes": self.sim_minutes,
             "date": self.sim_date(),
+            "raining": self.is_raining(),
             "closed_day": closed_day,
             "advanced": advance,  # False - пересчёт без хода времени (после переключения устройства)
             "level": self.battery_wh / BATTERY_CAPACITY_WH,
@@ -1248,7 +1330,12 @@ class SolarSimulator(QObject):
         }
         self.updated.emit(self.state)
 
+    def is_raining(self):
+        return self.cloudiness >= 0.85
+
     def weather_icon(self, generation):
+        if self.is_raining():
+            return "🌧 Дождь"
         if generation <= 0:
             return "🌙 Ночь"
         if self.cloudiness < 0.25:
@@ -1808,11 +1895,23 @@ def device_status_html(device, reading=None):
     type_code = device["type_code"]
     group = DEVICE_TYPES[type_code]["group"]
 
-    if type_code == "robot_vacuum":
+    if type_code == "irrigation":
+        model_info = MODELS.get(device["model_code"], {})
+        zones, per_zone = model_info.get("zones", 1), s.get("irr_minutes", 10)
+        if device["is_on"]:
+            elapsed = s.get("irr_elapsed", 0.0)
+            left = zones * per_zone - elapsed
+            return (f"💦 Полив зоны {min(zones, int(elapsed // per_zone) + 1)} из {zones} · осталось "
+                    f"{int(left // 60)}:{int(left % 60):02d}")
+        last = f" · полито {s.get('irr_water', 0):.0f} л" if s.get("irr_water") else ""
+        return f"💧 Влажность почвы {s.get('moisture', 35):.0f}%{last}"
+
+    if type_code in ROBOT_TYPES:
+        info = ROBOT_INFO[type_code]
         state = s.get("vac_state", "docked")
         battery = f"🔋 {s.get('vac_battery', 100):.0f}%"
         if state == "cleaning":
-            return f"🧹 Уборка {s.get('vac_progress', 0) * 100:.0f}% · {battery}"
+            return f"{info['icon']} {info['verb']} {s.get('vac_progress', 0) * 100:.0f}% · {battery}"
         if state == "paused":
             return f"⏸ Пауза {s.get('vac_progress', 0) * 100:.0f}% · {battery}"
         if state == "returning":
@@ -3311,16 +3410,92 @@ def _scene_porch(p, w, h, night):
     _box(p, w / 2 - 620, h - 60, 1240, 60, "#b0a79a")
 
 
+def _scene_yard(p, w, h, night):
+    """Участок перед домом: газон, подъездная дорожка, ворота, улица и соседние дома."""
+    _sky(p, 0, 0, w, h * 0.42, night)
+    rng = random.Random(5)
+    # соседние дома за улицей
+    for i, x in enumerate(range(-60, w, 340)):
+        hh = rng.randint(150, 230)
+        base = h * 0.47
+        wall = ["#d9c7a6", "#c9d3dc", "#e3d2c4", "#cfd8c6"][i % 4]
+        _box(p, x + 20, base - hh, 260, hh, QColor(wall).darker(170) if night else wall)
+        roof = QPolygonF([QPointF(x, base - hh + 4), QPointF(x + 150, base - hh - 90), QPointF(x + 300, base - hh + 4)])
+        p.setBrush(QColor("#5a3d33" if night else "#8c4b3c"))
+        p.drawPolygon(roof)
+        for wx in (x + 50, x + 170):
+            _box(p, wx, base - hh + 40, 60, 54, "#ffd36b" if night and rng.random() < 0.7 else ("#3a4654" if night else "#9ecbe6"), 4)
+    _trees_line(p, 0, h * 0.47, w, 21, night)
+    # тротуар и улица
+    _box(p, 0, h * 0.47, w, h * 0.03, "#8f9399" if night else "#b9bcc0")
+    _box(p, 0, h * 0.5, w, h * 0.09, "#2b2f35" if night else "#4a4f57")
+    p.setPen(QPen(QColor("#e8e3c0") if not night else QColor("#9a9678"), 6, Qt.DashLine))
+    p.drawLine(QPointF(0, h * 0.545), QPointF(w, h * 0.545))
+    p.setPen(Qt.NoPen)
+    # уличные фонари
+    for lx in (300, 1250, 2150):
+        _box(p, lx, h * 0.25, 12, h * 0.25, "#3a3f47")
+        _box(p, lx - 30, h * 0.24, 72, 16, "#3a3f47", 6)
+        _lamp_glow(p, lx + 6, h * 0.27, 230, night)
+    # газон участка
+    p.fillRect(QRectF(0, h * 0.59, w, h * 0.41), _vgrad(h * 0.59, h, "#3e6b35" if night else "#86c766",
+                                                       "#2f5a2a" if night else "#5fa64a"))
+    # забор с воротами
+    gate_l, gate_r = w / 2 - 220, w / 2 + 220
+    _box(p, 0, h * 0.58, gate_l, 14, "#2f3640")
+    _box(p, gate_r, h * 0.58, w - gate_r, 14, "#2f3640")
+    for x in range(10, w, 38):
+        if gate_l < x < gate_r:
+            continue
+        _box(p, x, h * 0.52, 10, h * 0.11, "#2f3640")
+    _box(p, gate_l - 14, h * 0.48, 28, h * 0.16, "#3a3f47", 4)
+    _box(p, gate_r - 14, h * 0.48, 28, h * 0.16, "#3a3f47", 4)
+    p.setPen(QPen(QColor("#4b535c"), 5))
+    for x in range(int(gate_l + 30), int(gate_r - 10), 40):
+        p.drawLine(QPointF(x, h * 0.505), QPointF(x, h * 0.62))
+    p.drawLine(QPointF(gate_l, h * 0.505), QPointF(gate_r, h * 0.505))
+    p.setPen(Qt.NoPen)
+    # подъездная дорожка к воротам
+    drive = QPolygonF([QPointF(gate_l + 10, h * 0.62), QPointF(gate_r - 10, h * 0.62),
+                       QPointF(w / 2 + 520, h), QPointF(w / 2 - 520, h)])
+    p.setBrush(QColor("#9c958a" if night else "#c9c1b3"))
+    p.drawPolygon(drive)
+    p.setPen(QPen(_color("#8a8377"), 3))
+    for i in range(1, 7):
+        t = (i / 7) ** 1.4
+        yy = h * 0.62 + h * 0.38 * t
+        half = 210 + 310 * t
+        p.drawLine(QPointF(w / 2 - half, yy), QPointF(w / 2 + half, yy))
+    p.setPen(Qt.NoPen)
+    # клумба, деревья, кусты
+    p.setBrush(QColor("#6b4a2f"))
+    p.drawEllipse(QRectF(1820, h * 0.74, 420, 110))
+    for i, col in enumerate(("#e07a5f", "#f2cc8f", "#e5484d", "#c77dff", "#ffd166", "#ef476f", "#f2cc8f")):
+        p.setBrush(QColor(col).darker(140) if night else QColor(col))
+        p.drawEllipse(QPointF(1870 + i * 52, h * 0.79 + (i % 2) * 18), 15, 15)
+    for tx, ts in ((220, 1.0), (520, 0.8)):
+        _box(p, tx - 14 * ts, h * 0.6, 28 * ts, 170 * ts, "#6b4a2f")
+        p.setBrush(QColor("#2d5a2f" if night else "#3f8f3f"))
+        p.drawEllipse(QPointF(tx, h * 0.58), 120 * ts, 110 * ts)
+        p.setBrush(QColor("#356b37" if night else "#4fa84f"))
+        p.drawEllipse(QPointF(tx - 40 * ts, h * 0.55), 70 * ts, 64 * ts)
+    _plant(p, 1560, h * 0.98, 1.4)
+
+
 SCENE_PAINTERS = {
+    "yard": _scene_yard,
     "living": _scene_living, "kitchen": _scene_kitchen, "bedroom": _scene_bedroom,
     "hallway": _scene_hallway, "garage": _scene_garage, "terrace": _scene_terrace, "porch": _scene_porch,
 }
 
 
-def scene_kind(room_name, model):
+def scene_kind(room_name, model, floor=None):
     if model.get("outdoor"):
         return "porch"
     name = room_name.lower()
+    if floor == "site":
+        # камера снаружи дома: терраса - свой вид, всё остальное - участок и улица
+        return "terrace" if any(k in name for k in ("террас", "терас")) else "yard"
     for keys, kind in ((("террас", "терас", "балкон", "двор", "сад", "улиц"), "terrace"),
                        (("прихож", "коридор", "холл", "вход"), "hallway"),
                        (("гараж",), "garage"), (("кух",), "kitchen"),
@@ -3393,7 +3568,7 @@ class CameraView(QWidget):
         self.timer.start(40)
 
     def kind(self):
-        return scene_kind(self.device["room_name"], self.model)
+        return scene_kind(self.device["room_name"], self.model, self.main.room_floor(self.device["room_id"]))
 
     def scene(self, variant):
         key = (self.device["room_name"], variant)
@@ -3475,7 +3650,7 @@ class CameraView(QWidget):
             d["is_on"] and d["room_id"] == self.device["room_id"] and DEVICE_TYPES[d["type_code"]]["group"] == LIGHT_GROUP
             for d in self.main.devices
         )
-        outdoor = self.kind() in ("terrace", "porch")
+        outdoor = self.kind() in ("terrace", "porch", "yard")
         lit = lights_on and not outdoor
         ir = night and not lit and s.get("night_vision")
         variant = "day" if not night else ("ir" if ir else "night")
@@ -3488,7 +3663,7 @@ class CameraView(QWidget):
             p.save()
             p.scale(kx, ky)
             p.translate(-sx, 0)
-            foot, height = (SCENE_H * 0.86, SCENE_H * 0.42) if self.kind() == "porch" else (SCENE_H * 0.95, SCENE_H * 0.62)
+            foot, height = (SCENE_H * 0.86, SCENE_H * 0.42) if self.kind() in ("porch", "yard") else (SCENE_H * 0.95, SCENE_H * 0.62)
             _draw_person(p, self.person["x"], foot, height, self.person["phase"],
                          "#9a9a9a" if ir else self.person["color"])
             p.restore()
@@ -3499,7 +3674,7 @@ class CameraView(QWidget):
             p.fillRect(r, QColor(30, 60, 30, 45))
 
         if self.person_in_view() and s.get("motion_alerts", True):
-            foot, height = (SCENE_H * 0.86, SCENE_H * 0.42) if self.kind() == "porch" else (SCENE_H * 0.95, SCENE_H * 0.62)
+            foot, height = (SCENE_H * 0.86, SCENE_H * 0.42) if self.kind() in ("porch", "yard") else (SCENE_H * 0.95, SCENE_H * 0.62)
             bx = (self.person["x"] - sx - height * 0.22) * kx
             by = (foot - height * 1.12) * ky
             box = QRectF(bx, by, height * 0.44 * kx, height * 1.14 * ky)
@@ -4086,17 +4261,7 @@ class RobotVacuumWidget(QWidget):
         p.setBrush(QColor("#ffffff"))
         p.drawRoundedRect(QRectF(self.rect()).adjusted(1, 1, -1, -1), 16, 16)
 
-        # пол с пылью
-        p.setBrush(QColor("#e6dccb"))
-        p.setPen(QPen(QColor("#5d6670"), 5))
-        p.drawRoundedRect(m, 10, 10)
-        p.setPen(Qt.NoPen)
-        p.setBrush(QColor("#d9c7b0"))
-        p.drawEllipse(QRectF(m.center().x() - m.width() * 0.18, m.center().y() - m.height() * 0.18,
-                             m.width() * 0.36, m.height() * 0.36))
-        for x, y, size in self.dust:
-            p.setBrush(QColor(110, 90, 70, 150))
-            p.drawEllipse(QPointF(m.left() + x * m.width(), m.top() + y * m.height()), size, size)
+        self.draw_ground(p, m)
 
         # убранная полоса
         progress = self.shown_progress if state != "docked" or s.get("vac_progress", 0) > 0 else 0.0
@@ -4108,11 +4273,8 @@ class RobotVacuumWidget(QWidget):
                 trail.lineTo(pt)
             trail.lineTo(pos)
             row_px = m.height() * 0.8 / (self.ROWS - 1)
-            p.setBrush(Qt.NoBrush)
-            p.setPen(QPen(QColor("#f8f4ec"), row_px + 3, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-            p.drawPath(trail)
-            p.setPen(QPen(QColor(0, 0, 0, 14), 2))
-            p.drawPath(trail)
+            self.draw_trail(p, trail, row_px)
+        self.draw_over_trail(p, m)
 
         # база
         dock = self.to_px(self.dock)
@@ -4138,20 +4300,7 @@ class RobotVacuumWidget(QWidget):
         p.save()
         p.translate(robot)
         p.rotate(angle)
-        if state == "cleaning":
-            p.setPen(QPen(QColor("#5d6670"), 1.5))
-            for k in range(3):
-                a = math.radians(self.phase * 40 + k * 120)
-                p.drawLine(QPointF(10, 10), QPointF(10 + 7 * math.cos(a), 10 + 7 * math.sin(a)))
-        p.setPen(QPen(QColor("#2f3640"), 2))
-        p.setBrush(QColor("#ffffff"))
-        p.drawEllipse(QPointF(0, 0), 14, 14)
-        p.setPen(Qt.NoPen)
-        p.setBrush(QColor("#2f3640"))
-        p.drawEllipse(QPointF(-2, 0), 5, 5)
-        p.setPen(QPen(QColor("#00b96b") if state == "cleaning" else QColor("#9aa5b1"), 3))
-        p.setBrush(Qt.NoBrush)
-        p.drawArc(QRectF(-14, -14, 28, 28), -50 * 16, 100 * 16)
+        self.draw_robot(p, state)
         p.restore()
 
         # верхняя строка
@@ -4159,8 +4308,11 @@ class RobotVacuumWidget(QWidget):
         font.setPixelSize(13)
         font.setBold(True)
         p.setFont(font)
+        info = ROBOT_INFO[self.device["type_code"]]
+        area = MODELS[self.device["model_code"]].get("area", info["area"])
         status = {
-            "cleaning": f"🧹 Уборка · {s.get('vac_progress', 0) * 100:.0f}% · ≈{s.get('vac_progress', 0) * 18:.0f} м²",
+            "cleaning": f"{info['icon']} {info['verb']} · {s.get('vac_progress', 0) * 100:.0f}% · "
+                        f"≈{s.get('vac_progress', 0) * area:.0f} м²",
             "paused": f"⏸ Пауза · {s.get('vac_progress', 0) * 100:.0f}%",
             "returning": "↩️ Возвращается на базу",
             "docked": "🏠 На базе" + (" · заряжается ⚡" if s.get("vac_battery", 100) < 99.5 else ""),
@@ -4178,6 +4330,228 @@ class RobotVacuumWidget(QWidget):
         p.drawRoundedRect(QRectF(bar.left() + 2, bar.top() + 2, (bar.width() - 4) * battery / 100, bar.height() - 4), 3, 3)
         p.setPen(QColor("#12293c"))
         p.drawText(QRectF(bar.right() + 4, bar.top() - 4, 40, 22), Qt.AlignLeft | Qt.AlignVCenter, f"{battery:.0f}%")
+
+    # --- части рисунка, которые газонокосилка рисует по-своему ---
+
+    def draw_ground(self, p, m):
+        p.setBrush(QColor("#e6dccb"))
+        p.setPen(QPen(QColor("#5d6670"), 5))
+        p.drawRoundedRect(m, 10, 10)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor("#d9c7b0"))
+        p.drawEllipse(QRectF(m.center().x() - m.width() * 0.18, m.center().y() - m.height() * 0.18,
+                             m.width() * 0.36, m.height() * 0.36))
+        for x, y, size in self.dust:
+            p.setBrush(QColor(110, 90, 70, 150))
+            p.drawEllipse(QPointF(m.left() + x * m.width(), m.top() + y * m.height()), size, size)
+
+    def draw_trail(self, p, trail, row_px):
+        p.setBrush(Qt.NoBrush)
+        p.setPen(QPen(QColor("#f8f4ec"), row_px + 3, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        p.drawPath(trail)
+        p.setPen(QPen(QColor(0, 0, 0, 14), 2))
+        p.drawPath(trail)
+
+    def draw_over_trail(self, p, m):
+        pass
+
+    def draw_robot(self, p, state):
+        if state == "cleaning":
+            p.setPen(QPen(QColor("#5d6670"), 1.5))
+            for k in range(3):
+                a = math.radians(self.phase * 40 + k * 120)
+                p.drawLine(QPointF(10, 10), QPointF(10 + 7 * math.cos(a), 10 + 7 * math.sin(a)))
+        p.setPen(QPen(QColor("#2f3640"), 2))
+        p.setBrush(QColor("#ffffff"))
+        p.drawEllipse(QPointF(0, 0), 14, 14)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor("#2f3640"))
+        p.drawEllipse(QPointF(-2, 0), 5, 5)
+        p.setPen(QPen(QColor("#00b96b") if state == "cleaning" else QColor("#9aa5b1"), 3))
+        p.setBrush(Qt.NoBrush)
+        p.drawArc(QRectF(-14, -14, 28, 28), -50 * 16, 100 * 16)
+
+
+class LawnMowerWidget(RobotVacuumWidget):
+    """Газонокосилка-робот: высокая трава, за косилкой остаются полосы скошенного газона, объезжает дерево и клумбу."""
+
+    def __init__(self, device, parent=None):
+        super().__init__(device, parent)
+        rng = random.Random(device["id"] * 7 + 3)
+        # травинки: (x, y, наклон, оттенок)
+        self.blades = [(rng.uniform(0.02, 0.98), rng.uniform(0.04, 0.97), rng.uniform(-0.4, 0.4), rng.randint(0, 2))
+                       for _ in range(900)]
+
+    def draw_ground(self, p, m):
+        p.setPen(QPen(QColor("#7a5a3a"), 5))
+        p.setBrush(QColor("#3f8a3a"))
+        p.drawRoundedRect(m, 10, 10)
+        sway = math.sin(self.phase * 0.15) * 0.15
+        shades = (QColor("#2f7a2c"), QColor("#4c9a3f"), QColor("#5fae4a"))
+        for x, y, tilt, shade in self.blades:
+            bx, by = m.left() + x * m.width(), m.top() + y * m.height()
+            p.setPen(QPen(shades[shade], 1.6))
+            p.drawLine(QPointF(bx, by), QPointF(bx + (tilt + sway) * 6, by - 7))
+
+    def draw_trail(self, p, trail, row_px):
+        # скошенная трава - светлые и тёмные полосы, как на настоящем газоне
+        p.setBrush(Qt.NoBrush)
+        p.setPen(QPen(QColor("#8fd16f"), row_px + 3, Qt.SolidLine, Qt.FlatCap, Qt.RoundJoin))
+        p.drawPath(trail)
+        p.setPen(QPen(QColor(255, 255, 255, 40), row_px * 0.45, Qt.SolidLine, Qt.FlatCap, Qt.RoundJoin))
+        p.drawPath(trail)
+
+    def draw_over_trail(self, p, m):
+        # дерево и клумба - препятствия поверх газона
+        tree = QPointF(m.left() + m.width() * 0.72, m.top() + m.height() * 0.32)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(0, 0, 0, 50))
+        p.drawEllipse(tree + QPointF(6, 8), 30, 30)
+        p.setBrush(QColor("#2d6a2f"))
+        p.drawEllipse(tree, 30, 30)
+        p.setBrush(QColor("#3f8f3f"))
+        p.drawEllipse(tree + QPointF(-8, -8), 18, 18)
+        bed = QRectF(m.left() + m.width() * 0.2, m.top() + m.height() * 0.55, m.width() * 0.18, m.height() * 0.16)
+        p.setBrush(QColor("#6b4a2f"))
+        p.drawRoundedRect(bed, 14, 14)
+        rng = random.Random(4)
+        for _ in range(9):
+            p.setBrush(QColor(rng.choice(["#e07a5f", "#f2cc8f", "#ef476f", "#c77dff", "#ffd166"])))
+            p.drawEllipse(QPointF(bed.left() + rng.uniform(10, bed.width() - 10), bed.top() + rng.uniform(8, bed.height() - 8)), 5, 5)
+
+    def draw_robot(self, p, state):
+        p.setPen(QPen(QColor("#1b1f24"), 2))
+        p.setBrush(QColor("#ff7a1a"))
+        p.drawRoundedRect(QRectF(-17, -13, 34, 26), 9, 9)
+        p.setBrush(QColor("#2f3640"))
+        for wy in (-15, 11):
+            p.drawRoundedRect(QRectF(-12, wy, 9, 4), 2, 2)
+            p.drawRoundedRect(QRectF(5, wy, 9, 4), 2, 2)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor("#1b1f24"))
+        p.drawEllipse(QPointF(3, 0), 6, 6)
+        if state == "cleaning":
+            p.setPen(QPen(QColor(255, 255, 255, 180), 1.5))
+            for k in range(2):
+                a = math.radians(self.phase * 60 + k * 180)
+                p.drawLine(QPointF(3, 0), QPointF(3 + 6 * math.cos(a), 6 * math.sin(a)))
+            # летящие травинки
+            p.setPen(QPen(QColor("#9fe08a"), 1.5))
+            for k in range(4):
+                a = self.phase * 0.7 + k
+                p.drawLine(QPointF(-18 - (k * 4 + self.phase * 3) % 12, math.sin(a) * 8),
+                           QPointF(-21 - (k * 4 + self.phase * 3) % 12, math.sin(a) * 8 - 2))
+
+
+# ---------- автополив ----------
+
+class IrrigationWidget(QWidget):
+    """Автополив: участок, разделённый на зоны; в активной зоне вращаются разбрызгиватели, влажность почвы растёт."""
+
+    def __init__(self, main, device, parent=None):
+        super().__init__(parent)
+        self.main = main
+        self.device = device
+        self.model = MODELS[device["model_code"]]
+        self.zones = self.model.get("zones", 1)
+        self.phase = 0.0
+        self.drops = []
+        self.setFixedHeight(320)
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self._tick)
+        self.timer.start(33)
+
+    def zone_rects(self):
+        m = QRectF(14, 46, self.width() - 28, self.height() - 92)
+        cols = 1 if self.zones == 1 else (2 if self.zones <= 4 else 3)
+        rows = math.ceil(self.zones / cols)
+        w, h = m.width() / cols, m.height() / rows
+        return [QRectF(m.left() + (i % cols) * w + 3, m.top() + (i // cols) * h + 3, w - 6, h - 6) for i in range(self.zones)]
+
+    def active_zone(self):
+        s = self.device["settings"]
+        if not self.device["is_on"]:
+            return None
+        return min(self.zones - 1, int(s.get("irr_elapsed", 0.0) // max(1, s.get("irr_minutes", 10))))
+
+    def _tick(self):
+        self.phase += 0.08
+        zone = self.active_zone()
+        if zone is not None:
+            rect = self.zone_rects()[zone]
+            for cx, cy in self.sprinklers(rect):
+                for _ in range(3):
+                    a = self.phase * 2.2 + random.uniform(-0.25, 0.25)
+                    speed = random.uniform(2.0, 4.0)
+                    self.drops.append([cx, cy, math.cos(a) * speed, math.sin(a) * speed, 1.0])
+        for d in self.drops:
+            d[0] += d[2]
+            d[1] += d[3]
+            d[4] -= 0.035
+        self.drops = [d for d in self.drops if d[4] > 0]
+        self.update()
+
+    @staticmethod
+    def sprinklers(rect):
+        return [(rect.center().x(), rect.center().y())] if rect.width() < 200 else \
+            [(rect.left() + rect.width() * 0.3, rect.center().y()), (rect.left() + rect.width() * 0.7, rect.center().y())]
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        s = self.device["settings"]
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor("#ffffff"))
+        p.drawRoundedRect(QRectF(self.rect()).adjusted(1, 1, -1, -1), 16, 16)
+        moisture = s.get("moisture", 35.0)
+        wet = max(0.0, min(1.0, (moisture - 15) / 70))
+        active = self.active_zone()
+        font = QFont(self.font())
+        font.setPixelSize(12)
+        font.setBold(True)
+        p.setFont(font)
+        for i, rect in enumerate(self.zone_rects()):
+            grass = _lerp_color(QColor("#b8b36a"), QColor("#3f9a3a"), wet)
+            p.setBrush(grass if i != active else grass.darker(112))
+            p.setPen(QPen(QColor("#00a3e0") if i == active else QColor("#7a5a3a"), 3 if i == active else 2))
+            p.drawRoundedRect(rect, 10, 10)
+            for cx, cy in self.sprinklers(rect):
+                p.setPen(Qt.NoPen)
+                p.setBrush(QColor("#2f3640"))
+                p.drawEllipse(QPointF(cx, cy), 6, 6)
+                if i == active:
+                    a = self.phase * 2.2
+                    p.setPen(QPen(QColor(0, 163, 224, 140), 3))
+                    p.drawLine(QPointF(cx, cy), QPointF(cx + math.cos(a) * 22, cy + math.sin(a) * 22))
+            p.setPen(QColor("#ffffff"))
+            p.drawText(QRectF(rect.left() + 8, rect.top() + 4, 120, 18), Qt.AlignLeft | Qt.AlignVCenter, f"Зона {i + 1}")
+        p.setPen(Qt.NoPen)
+        for x, y, _, _, life in self.drops:
+            p.setBrush(QColor(80, 180, 255, int(200 * life)))
+            p.drawEllipse(QPointF(x, y), 2.4, 2.4)
+
+        # верхняя строка и влажность
+        if self.device["is_on"]:
+            left = self.zones * s.get("irr_minutes", 10) - s.get("irr_elapsed", 0.0)
+            status = f"💦 Полив зоны {active + 1} из {self.zones} · осталось {int(left // 60)}:{int(left % 60):02d}"
+        elif self.main.simulator.state.get("raining"):
+            status = "🌧 Идёт дождь — поливать не нужно"
+        else:
+            status = "Полив выключен"
+        p.setPen(QColor("#12293c"))
+        font.setPixelSize(13)
+        p.setFont(font)
+        p.drawText(QRectF(18, 10, self.width() - 36, 26), Qt.AlignLeft | Qt.AlignVCenter, status)
+        bar = QRectF(18, self.height() - 36, self.width() - 200, 14)
+        p.setPen(QPen(QColor("#9fb3c3"), 2))
+        p.setBrush(Qt.NoBrush)
+        p.drawRoundedRect(bar, 5, 5)
+        p.setPen(Qt.NoPen)
+        p.setBrush(_lerp_color(QColor("#e0a458"), QColor("#2f8de4"), wet))
+        p.drawRoundedRect(QRectF(bar.left() + 2, bar.top() + 2, (bar.width() - 4) * min(1.0, moisture / 100), 10), 4, 4)
+        p.setPen(QColor("#12293c"))
+        p.drawText(QRectF(bar.right() + 10, bar.top() - 4, 180, 22), Qt.AlignLeft | Qt.AlignVCenter,
+                   f"💧 Почва {moisture:.0f}% · {s.get('irr_water', 0):.0f} л")
 
 
 # ---------- стиральная машина ----------
@@ -4379,7 +4753,8 @@ class DeviceControlDialog(QDialog):
         self.setWindowTitle(device["name"])
         if "video" in self.caps:
             self.resize(680, 880)
-        elif device["type_code"] in ("kettle", "air_conditioner", "heater", "robot_vacuum", "washer"):
+        elif device["type_code"] in ("kettle", "air_conditioner", "heater", "robot_vacuum", "washer", "lawn_mower",
+                                     "irrigation"):
             self.resize(600, 900)
         else:
             self.resize(500, 720)
@@ -4514,8 +4889,10 @@ class DeviceControlDialog(QDialog):
             self.build_kettle_controls()
         if type_code in ("air_conditioner", "heater"):
             self.build_climate_controls()
-        if type_code == "robot_vacuum":
+        if type_code in ROBOT_TYPES:
             self.build_vacuum_controls()
+        if type_code == "irrigation":
+            self.build_irrigation_controls()
         if type_code == "washer":
             self.build_washer_controls()
         if self.type_info["group"] == LIGHT_GROUP:
@@ -4598,6 +4975,9 @@ class DeviceControlDialog(QDialog):
 
         if "volume" in caps:
             self._slider("Громкость", "volume", 0, 100, lambda v: f"{v}%")
+
+        if "cut_height" in caps:
+            self._slider("Высота стрижки", "cut_height", 20, 60, lambda v: f"{v} мм", step=5)
 
         if "current" in caps:
             self._slider("Ток зарядки", "current", 6, self.model["max_current"],
@@ -4731,7 +5111,8 @@ class DeviceControlDialog(QDialog):
     # ---------- робот-пылесос ----------
 
     def build_vacuum_controls(self):
-        self.vacuum_view = RobotVacuumWidget(self.device)
+        widget_class = LawnMowerWidget if self.device["type_code"] == "lawn_mower" else RobotVacuumWidget
+        self.vacuum_view = widget_class(self.device)
         self.controls.addWidget(self.vacuum_view)
         row = QHBoxLayout()
         self.vac_main_btn = QPushButton()
@@ -4768,11 +5149,41 @@ class DeviceControlDialog(QDialog):
 
     def _refresh_vacuum(self):
         state = self.s.get("vac_state", "docked")
-        text = {"cleaning": "⏸  Пауза", "paused": "▶  Продолжить уборку", "returning": "↩️  Едет на базу…",
-                "docked": "▶  Начать уборку"}[state]
+        verb = ROBOT_INFO[self.device["type_code"]]["start"]
+        text = {"cleaning": "⏸  Пауза", "paused": "▶  Продолжить", "returning": "↩️  Едет на базу…",
+                "docked": f"▶  Начать {'уборку' if verb == 'уборки' else 'стрижку'}"}[state]
         self.vac_main_btn.setText(text)
         self.vac_main_btn.setEnabled(state != "returning")
         self.vac_home_btn.setEnabled(state in ("cleaning", "paused"))
+
+    # ---------- автополив ----------
+
+    def build_irrigation_controls(self):
+        self.irrigation_view = IrrigationWidget(self.main, self.device)
+        self.controls.addWidget(self.irrigation_view)
+        self.irr_btn = QPushButton()
+        self.irr_btn.setMinimumHeight(48)
+        self.irr_btn.setCursor(Qt.PointingHandCursor)
+        self.irr_btn.clicked.connect(lambda: self.power_switch.setChecked(not self.device["is_on"]))
+        self.controls.addWidget(self.irr_btn)
+        zones = self.model.get("zones", 1)
+        self._slider("Полив каждой зоны", "irr_minutes", 5, 60, lambda v: f"{v} мин · всего {v * zones} мин", step=5)
+        info = QLabel(f"Зон: {zones} · расход воды ≈ {self.model.get('flow', 15)} л/мин · время идёт по часам дома")
+        info.setObjectName("subtitle")
+        self.controls.addWidget(info)
+        total = QLabel()
+        total.setObjectName("subtitle")
+        self.irr_total = total
+        self.controls.addWidget(total)
+
+    def _refresh_irrigation(self):
+        if self.device["is_on"]:
+            self.irr_btn.setText("⏹  Остановить полив")
+            self.irr_btn.setStyleSheet("background-color: #2f8de4;")
+        else:
+            self.irr_btn.setText("💦  Начать полив")
+            self.irr_btn.setStyleSheet("")
+        self.irr_total.setText(f"Всего израсходовано воды: {self.s.get('water_total', 0):.0f} л")
 
     # ---------- стиральная машина ----------
 
@@ -4979,6 +5390,8 @@ class DeviceControlDialog(QDialog):
             self._refresh_vacuum()
         if hasattr(self, "wash_btn"):
             self._refresh_washer()
+        if hasattr(self, "irr_btn"):
+            self._refresh_irrigation()
         if hasattr(self, "dial"):
             self.dial.update()
         if hasattr(self, "light_preview"):
@@ -5149,8 +5562,10 @@ def plan_glow_color(device):
     """Цвет свечения значка на плане (None - устройство неактивно)."""
     t = device["type_code"]
     s = device["settings"]
-    if t == "robot_vacuum":
+    if t in ROBOT_TYPES:
         return QColor(ACCENT) if s.get("vac_state") in ("cleaning", "returning") else None
+    if t == "irrigation":
+        return QColor("#2f8de4") if device["is_on"] else None
     if not device["is_on"]:
         return None
     if DEVICE_TYPES[t]["group"] == LIGHT_GROUP:
@@ -6329,7 +6744,7 @@ class MainWindow(QMainWindow):
 
     COLUMNS = 3
     PAGES = [("devices", "📱 Устройства"), ("plan", "🗺 План дома"), ("energy", "📊 Энергия"), ("events", "🔔 События")]
-    STATEFUL_TYPES = {"kettle", "washer", "robot_vacuum"}  # их состояние периодически сохраняется в базу
+    STATEFUL_TYPES = {"kettle", "washer", "robot_vacuum", "lawn_mower", "irrigation"}  # их состояние периодически сохраняется в базу
 
     def __init__(self, db: Database, user: dict):
         super().__init__()
@@ -6833,15 +7248,23 @@ class MainWindow(QMainWindow):
             self.log_event("device", "🧺", f"{d['name']}: {washer_phase(washer_fraction(s)).lower()}")
 
     def step_vacuum(self, d, minutes):
+        """Робот-пылесос и газонокосилка: работа по маршруту, возврат на базу, зарядка."""
         s = d["settings"]
+        info = ROBOT_INFO[d["type_code"]]
         state = s.get("vac_state", "docked")
-        mode_factor = dict(TYPE_MODES["robot_vacuum"]).get(s.get("mode"), 1.0)
+        mode_factor = dict(TYPE_MODES[d["type_code"]]).get(s.get("mode"), 1.0)
+        if state == "cleaning" and d["type_code"] == "lawn_mower" and s.get("rain_sensor") \
+                and self.simulator.state.get("raining"):
+            s.update(vac_state="returning", vac_return=0.0)
+            self.log_event("device", "🌧", f"{d['name']}: начался дождь — возвращается на базу", toast=True)
+            return
         if state == "cleaning":
-            s["vac_progress"] = min(1.0, s.get("vac_progress", 0.0) + minutes / VAC_CLEAN_MIN)
-            s["vac_battery"] = max(0.0, s.get("vac_battery", 100) - minutes * VAC_DRAIN * mode_factor)
+            s["vac_progress"] = min(1.0, s.get("vac_progress", 0.0) + minutes / info["minutes"])
+            s["vac_battery"] = max(0.0, s.get("vac_battery", 100) - minutes * info["drain"] * mode_factor)
             if s["vac_progress"] >= 1.0:
                 s.update(vac_state="returning", vac_return=0.0)
-                self.log_event("device", "🤖", f"{d['name']}: уборка завершена, возвращается на базу", toast=True)
+                self.log_event("device", "🤖" if d["type_code"] == "robot_vacuum" else "🚜",
+                               f"{d['name']}: {info['done']}, возвращается на базу", toast=True)
             elif s["vac_battery"] <= VAC_LOW_BATTERY:
                 s.update(vac_state="returning", vac_return=0.0)
                 self.log_event("device", "🪫", f"{d['name']}: низкий заряд, едет на базу", toast=True)
@@ -6858,6 +7281,28 @@ class MainWindow(QMainWindow):
                 self.log_event("device", "🏠", f"{d['name']}: на базе, заряжается")
         elif state == "docked":
             s["vac_battery"] = min(100.0, s.get("vac_battery", 100) + minutes * VAC_CHARGE)
+
+    def step_irrigation(self, d, minutes):
+        s = d["settings"]
+        model = MODELS[d["model_code"]]
+        raining = self.simulator.state.get("raining")
+        if d["is_on"]:
+            water = model.get("flow", 15) * minutes
+            s["irr_elapsed"] = s.get("irr_elapsed", 0.0) + minutes
+            s["irr_water"] = s.get("irr_water", 0.0) + water
+            s["water_total"] = s.get("water_total", 0.0) + water
+            s["moisture"] = min(90.0, s.get("moisture", 35.0) + 0.9 * minutes / model.get("zones", 1))
+            if s["irr_elapsed"] >= model.get("zones", 1) * s.get("irr_minutes", 10):
+                s["irr_elapsed"] = 0.0
+                self.set_device_on(d, False, source="auto")
+                self.log_event("device", "💦", f"{d['name']}: полив завершён, израсходовано {s['irr_water']:.0f} л воды",
+                               toast=True)
+        else:
+            # почва сохнет на солнце и намокает под дождём
+            sun = self.simulator.state.get("generation", 0) / SOLAR_PEAK_W
+            s["moisture"] = max(10.0, s.get("moisture", 35.0) - (0.01 + 0.03 * sun) * minutes)
+            if raining:
+                s["moisture"] = min(90.0, s["moisture"] + 0.15 * minutes)
 
     def allocate_solar(self, state):
         """Режим «только от излишков солнца»: раздаём устройствам то, что панели дают сверх потребления дома."""
@@ -6957,10 +7402,18 @@ class MainWindow(QMainWindow):
     def set_device_on(self, device, on, source="user"):
         s = device["settings"]
         t = device["type_code"]
-        if t == "robot_vacuum":
+        requested = on
+        if t == "irrigation" and on:
+            if s.get("rain_sensor") and self.simulator.state.get("raining"):
+                self.log_event("device", "🌧", f"{device['name']}: идёт дождь — полив отменён", toast=True)
+                on = False
+            else:
+                s.update(irr_elapsed=0.0, irr_water=0.0)
+        if t in ROBOT_TYPES:
             if on:
                 if s.get("vac_battery", 100) < VAC_LOW_BATTERY + 10:
-                    self.log_event("device", "🪫", f"{device['name']}: недостаточно заряда для уборки", toast=True)
+                    self.log_event("device", "🪫", f"{device['name']}: недостаточно заряда для "
+                                                   f"{ROBOT_INFO[t]['start']}", toast=True)
                     on = False
                 else:
                     if s.get("vac_progress", 0) >= 1.0:
@@ -6983,7 +7436,7 @@ class MainWindow(QMainWindow):
             s.pop("timer_min", None)
         self.db.save_settings(device["id"], s)
         self.db.set_device_state(device["id"], on)
-        if source == "user":
+        if source == "user" and on == requested:  # отказ (нет заряда, дождь) уже записан в журнал
             self.log_event("device", "🟢" if on else "⚪", f"{'Включено' if on else 'Выключено'}: {device['name']} "
                                                          f"({device['room_name']})")
         card = self.cards.get(device["id"])
@@ -7175,8 +7628,10 @@ class MainWindow(QMainWindow):
                                        color="#e5484d")
                 elif t == "washer":
                     self.step_washer(d, minutes)
-                elif t == "robot_vacuum":
+                elif t in ROBOT_TYPES:
                     self.step_vacuum(d, minutes)
+                elif t == "irrigation":
+                    self.step_irrigation(d, minutes)
             self.step_climate(minutes)
             self.allocate_solar(state)
             self.check_eco(state)
