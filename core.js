@@ -356,7 +356,11 @@ function seededRandom(seedText) {
   return () => { a |= 0; a = (a + 0x6D2B79F5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
 }
 
-const ENERGY_HISTORY_START = new Date(2025, 0, 1);
+// С этого дня в доме «работает» система (как HOME_SINCE в home.py): прошлые дни заполняются
+// смоделированной историей - энергия и журнал событий, как будто приложением пользуются уже полгода
+const HOME_SINCE = new Date(2026, 4, 18);
+const ENERGY_HISTORY_START = HOME_SINCE;
+const LIVE_EVENTS_LIMIT = 1000; // живых событий храним в localStorage, смоделированные - вычисляются на лету
 
 // Правдоподобная суточная история (как в настольной версии): лето - больше солнца, зима - отопление,
 // облачность меняется день ото дня, аккумулятор переносит заряд из дня в ночь. Значения в Вт·ч.
@@ -384,11 +388,206 @@ function syntheticEnergyHistory(userId, devicesCount, until) {
 
 function backfillEnergyHistory(user, home) {
   home.days = home.days || {};
+  // история начинается с HOME_SINCE - более ранние дни (старые версии писали с 2025 года) убираем
+  const since = isoDate(HOME_SINCE);
+  Object.keys(home.days).forEach(k => { if (k < since) delete home.days[k]; });
   const until = addDays(new Date(), -1);
-  const lastKey = isoDate(until);
-  if (home.days[lastKey]) return;
-  const series = syntheticEnergyHistory(user.id, home.devices.length, until);
-  Object.entries(series).forEach(([k, v]) => { if (!home.days[k]) home.days[k] = v.map(x => Math.round(x)); });
+  if (!home.days[isoDate(until)]) {
+    const series = syntheticEnergyHistory(user.id, home.devices.length, until);
+    Object.entries(series).forEach(([k, v]) => { if (!home.days[k]) home.days[k] = v.map(x => Math.round(x)); });
+  }
+  // «За всё время» - не меньше, чем набралось за всю историю дома
+  const sums = [0, 0, 0];
+  Object.values(home.days).forEach(v => { sums[0] += v[0]; sums[1] += v[2]; sums[2] += v[3]; });
+  home.totals.gen = Math.max(home.totals.gen, sums[0]);
+  home.totals.imp = Math.max(home.totals.imp, sums[1]);
+  home.totals.exp = Math.max(home.totals.exp, sums[2]);
+}
+
+// ---------- смоделированный журнал событий (как synthetic_event_history в home.py) ----------
+
+const clock = m => { m = Math.max(0, Math.min(1439, Math.floor(m))); return `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`; };
+
+// События прошлых дней согласованы с энергоисторией: в солнечные дни АКБ заряжается полностью и авто заряжается
+// от излишков, в пасмурные - дом берёт энергию из сети и срабатывает эко-режим; летом полив и газонокосилка,
+// зимой обогреватель. Каждый день детерминирован, поэтому журнал не хранится, а вычисляется заново.
+function syntheticEventHistory(userId, home, dayKeys) {
+  const tariff = home.tariff || C.DEFAULT_TARIFF_KZT;
+  const roomName = d => (home.rooms.find(r => r.id === d.roomId) || {}).name || "";
+  const byType = {};
+  home.devices.forEach(d => { (byType[d.type] = byType[d.type] || []).push(d); });
+  // устройства появлялись в доме постепенно, за первые три недели (инвертор - с первого дня)
+  const orderRnd = seededRandom("devices-added-" + userId), added = {};
+  home.devices.forEach(d => { added[d.id] = isoDate(addDays(HOME_SINCE, d.type === "inverter" ? 0 : Math.floor(orderRnd() * 21))); });
+  const washerModes = (D.modes.washer || [["Хлопок 60°"]]).map(m => m[0]);
+  const out = [];
+  dayKeys.forEach(key => {
+    const day = parseIso(key), rnd = seededRandom(`events-${userId}-${key}`);
+    const int = (a, b) => a + Math.floor(rnd() * (b - a + 1));
+    const pick = xs => xs[Math.floor(rnd() * xs.length)];
+    const evs = [];
+    const add = (m, cat, icon, text) => evs.push({ m: Math.max(0, Math.min(1439, Math.floor(m))), cat, icon, text });
+    const present = t => (byType[t] || []).filter(d => added[d.id] <= key);
+    const toggle = (d, m, on = true) => add(m, "device", on ? "🟢" : "⚪", `${on ? "Включено" : "Выключено"}: ${d.name} (${roomName(d)})`);
+
+    const summer = 0.5 + 0.5 * Math.cos(2 * Math.PI * (dayOfYear(day) - 172) / 365);
+    const weekend = day.getDay() === 0 || day.getDay() === 6, month = day.getMonth() + 1;
+    const [gen, , imp, exp] = (home.days || {})[key] || [0, 0, 0, 0];
+    const sunny = gen / (C.SOLAR_PEAK_W * (1.6 + 4.2 * summer)), rainy = sunny < 0.45;
+    const warm = month >= 5 && month <= 9, cold = summer < 0.35, hot = summer > 0.8 && sunny > 0.65;
+    const sunrise = 470 - 140 * summer + int(-4, 4), sunset = 1040 + 220 * summer + int(-4, 4);
+
+    home.devices.forEach(d => { if (added[d.id] === key) add(int(600, 1260), "device", "➕", `Добавлено устройство: ${d.name} (${roomName(d)})`); });
+
+    // энергосистема
+    add(sunrise, "energy", "🌅", "Восход — солнечные панели начали выработку");
+    add(sunset, "energy", "🌇", `Закат — выработка за день ${(gen / 1000).toFixed(1)} кВт·ч (≈ ${formatMoney(gen / 1000 * tariff)})`);
+    if (exp > 300) add(int(750, 930), "energy", "🔋", "Аккумулятор полностью заряжен");
+    if (imp > 300) {
+      const low = imp > 2500 ? int(30, 150) : int(180, 300);
+      add(low, "energy", "🪫", `Заряд АКБ ниже 20% (${int(17, 19)}%)`);
+      const shed = [...new Set(D.ecoShedTypes.flatMap(t => present(t).map(d => d.name)))].join(", ");
+      if (shed && imp > 4000) {
+        add(low + 2, "energy", "🌿", `Эко-режим: АКБ ${int(18, 19)}% — отключены: ${shed}`);
+        add(sunrise + int(200, 320), "energy", "🌿", `Эко-режим: АКБ ${int(40, 46)}% — снова включены: ${shed}`);
+      }
+      add(low + int(25, 70), "energy", "🔌", "Дом перешёл на питание от внешней сети");
+      add(sunrise + int(90, 170), "energy", "🔋", "Питание от сети больше не требуется");
+    }
+    present("ev_charger").forEach(d => {
+      if (exp > 1500 && rnd() < 0.6) {
+        const start = int(660, 780);
+        add(start, "energy", "☀️", `${d.name}: работает от излишков солнца (${formatPower(1800 + rnd() * (Math.min(7000, 1800 + exp / 2) - 1800))})`);
+        add(Math.max(start + 60, int(900, Math.floor(sunset) - 40)), "energy", "⏸", `${d.name}: излишков нет — ждёт солнца`);
+      }
+    });
+
+    // распорядок дня
+    const leave = !weekend && rnd() < 0.8 ? int(475, 530) : null;
+    if (leave) add(leave, "device", "🎬", `Сценарий «Ухожу из дома (выключить всё)»: изменено устройств — ${int(3, 7)}`);
+    if (rnd() < 0.6) add(int(1350, 1435), "device", "🎬", `Сценарий «Выключить свет во всём доме»: изменено устройств — ${int(2, 5)}`);
+    present("kettle").forEach(d => {
+      const morning = weekend ? int(500, 600) : int(400, 450);
+      if (rnd() < 0.03) add(morning - 3, "device", "💧", `${d.name}: нет воды — нагрев отменён`);
+      add(morning, "device", "☕", `${d.name}: вода нагрета до ${pick([60, 80, 90, 100, 100])}°C`);
+      if (rnd() < 0.55) add(int(1110, 1290), "device", "☕", `${d.name}: вода нагрета до ${pick([80, 90, 100])}°C`);
+    });
+    present("tv").forEach(d => {
+      if (rnd() < 0.8) { const on = int(1140, 1260); toggle(d, on); toggle(d, Math.min(1435, on + int(60, 150)), false); }
+      if (weekend && rnd() < 0.5) { const on = int(660, 900); toggle(d, on); toggle(d, on + int(40, 120), false); }
+    });
+    present("bulb").forEach(d => { if (sunset < 1290 || rnd() < 0.4) toggle(d, Math.max(sunset + int(-20, 20), 1080)); });
+    present("bedside_lamp").forEach(d => {
+      if (rnd() < 0.7) {
+        const on = int(1350, 1410);
+        toggle(d, on);
+        if (rnd() < 0.6) add(on + pick([15, 30]), "device", "⏱", `Таймер: выключено «${d.name}»`);
+      }
+    });
+    present("light_strip").forEach(d => {
+      if ((warm && weekend) || month === 12) { toggle(d, sunset + int(5, 30)); toggle(d, int(1380, 1435), false); }
+    });
+
+    // климат
+    present("air_conditioner").forEach(d => {
+      if (hot && rnd() < 0.85) {
+        const on = int(780, 900);
+        toggle(d, on);
+        add(on + int(25, 50), "device", "❄️", `${d.name}: в комнате «${roomName(d)}» достигнуто ${d.s.target_temp ?? 24}°C`);
+      }
+    });
+    present("heater").forEach(d => {
+      if (cold && rnd() < 0.8) {
+        [int(390, 450)].concat(rnd() < 0.5 ? [int(1080, 1200)] : []).forEach(on => {
+          toggle(d, on);
+          add(on + int(20, 45), "device", "🔥", `${d.name}: в комнате «${roomName(d)}» достигнуто ${d.s.target_temp ?? 22}°C`);
+        });
+      }
+    });
+
+    // бытовая техника
+    present("washer").forEach(d => {
+      if (rnd() < (weekend ? 0.7 : 0.4)) {
+        const start = int(540, 1140);
+        toggle(d, start);
+        add(start + int(80, 140), "device", "🧺", `${d.name}: стирка завершена (${pick(washerModes)})`);
+      }
+    });
+    present("dishwasher").forEach(d => { if (rnd() < 0.55) toggle(d, int(1260, 1350)); });
+    present("vacuum").forEach(d => {
+      if (weekend && rnd() < 0.5) { const on = int(600, 720); toggle(d, on); toggle(d, on + int(15, 30), false); }
+    });
+    present("robot_vacuum").forEach(d => {
+      if ((leave && rnd() < 0.75) || (weekend && rnd() < 0.3)) {
+        const start = (leave || 600) + int(20, 90);
+        toggle(d, start);
+        let finish;
+        if (rnd() < 0.06) { add(start + int(25, 35), "device", "🪫", `${d.name}: низкий заряд, едет на базу`); finish = start + 38; }
+        else { finish = start + int(40, 55); add(finish, "device", "🤖", `${d.name}: уборка завершена, возвращается на базу`); }
+        add(finish + int(3, 5), "device", "🏠", `${d.name}: на базе, заряжается`);
+      }
+    });
+
+    // участок
+    present("lawn_mower").forEach(d => {
+      if (warm && (day.getDay() === 3 || day.getDay() === 6)) {
+        const start = int(600, 660);
+        if (rainy && rnd() < 0.5) {
+          toggle(d, start);
+          add(start + int(15, 30), "device", "🌧", `${d.name}: начался дождь — возвращается на базу`);
+        } else if (!rainy) {
+          toggle(d, start);
+          const finish = start + int(60, 75);
+          add(finish, "device", "🚜", `${d.name}: газон подстрижен, возвращается на базу`);
+          add(finish + int(3, 5), "device", "🏠", `${d.name}: на базе, заряжается`);
+        }
+      }
+    });
+    present("irrigation").forEach(d => {
+      if (warm && ([6, 7, 8].includes(month) || dayOfYear(day) % 2 === 0)) {
+        const start = int(330, 360);
+        if (rainy) add(start, "device", "🌧", `${d.name}: идёт дождь — полив отменён`);
+        else {
+          const minutes = d.s.irr_minutes || 10;
+          toggle(d, start);
+          add(start + minutes, "device", "💦", `${d.name}: полив завершён, израсходовано ${Math.round(minutes * (11 + rnd() * 3))} л воды`);
+        }
+      }
+    });
+
+    // безопасность
+    present("motion_sensor").forEach(d => {
+      const times = weekend ? Array.from({ length: int(3, 7) }, () => int(480, 1410))
+        : Array.from({ length: int(1, 2) }, () => int(390, 510)).concat(Array.from({ length: int(2, 4) }, () => int(1080, 1410)));
+      times.forEach(m => add(m, "security", "🏃", `Движение: ${roomName(d)} (${d.name})`));
+    });
+    present("door_sensor").forEach(d => {
+      for (let i = int(1, 3); i > 0; i--) {
+        const opened = int(420, 1350);
+        add(opened, "security", "🚪", `Открыто: ${d.name} (${roomName(d)})`);
+        add(opened + int(1, 8), "security", "🚪", `Закрыто: ${d.name} (${roomName(d)})`);
+      }
+    });
+    present("presence_sensor").forEach(d => {
+      add(weekend ? int(480, 600) : int(1050, 1200), "security", "👥", `Обнаружено присутствие: ${roomName(d)}`);
+      if (!weekend) add(int(470, 530), "security", "👥", `Никого нет: ${roomName(d)}`);
+    });
+    present("camera").forEach(d => {
+      if (d.s.motion_alerts === false) return;
+      const outdoor = ["Двор", "Терраса", "Гараж"].includes(roomName(d));
+      for (let i = outdoor ? int(0, 2) : pick([0, 0, 0, 1]); i > 0; i--) {
+        add(int(420, 1320), "security", "📹", `${d.name}: обнаружен человек (${roomName(d)})`);
+      }
+      if (outdoor && rnd() < 0.015) add(int(60, 240), "security", "📹", `${d.name}: обнаружен человек (${roomName(d)})`);
+    });
+    present("doorbell").forEach(d => {
+      if (rnd() < (weekend ? 0.45 : 0.3)) add(int(660, 1200), "security", "📹", `${d.name}: обнаружен человек (${roomName(d)})`);
+    });
+
+    evs.sort((a, b) => a.m - b.m);
+    evs.forEach(e => out.push({ day: key, t: clock(e.m), cat: e.cat, icon: e.icon, text: e.text }));
+  });
+  return out;
 }
 
 // ---------- симуляция ----------
@@ -402,6 +601,10 @@ class Engine {
     this.startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     this.simMinutes = now.getHours() * 60 + now.getMinutes() + now.getSeconds() / 60;
     backfillEnergyHistory(user, this.home);
+    // у событий появилась дата: старым (без неё) ставим сегодняшнюю
+    const today = isoDate(this.startDate);
+    this.home.events.forEach(e => { if (!e.day) e.day = today; });
+    this.home.liveDays = [...new Set((this.home.liveDays || []).concat(this.home.events.map(e => e.day)))];
     this.minutesPerTick = 1;
     this.cloudiness = Math.random() * 0.4;
     this.today = { gen: 0, cons: 0, imp: 0, exp: 0 };
@@ -495,10 +698,38 @@ class Engine {
   recalc() { this.tick(false); }
 
   log(category, icon, text, toast, color) {
-    const ev = { t: simTimeText(this.simMinutes), cat: category, icon, text };
-    this.home.events.push(ev);
-    if (this.home.events.length > 300) this.home.events.splice(0, this.home.events.length - 300);
+    const day = isoDate(this.simDate());
+    const ev = { day, t: simTimeText(this.simMinutes), cat: category, icon, text };
+    const home = this.home;
+    home.events.push(ev);
+    if (home.events.length > LIVE_EVENTS_LIMIT) home.events.splice(0, home.events.length - LIVE_EVENTS_LIMIT);
+    home.liveDays = home.liveDays || [];
+    if (!home.liveDays.includes(day)) { home.liveDays.push(day); this._journal = null; }
     if (this.hooks.onEvent) this.hooks.onEvent(ev, !!toast, color);
+  }
+
+  // Весь журнал по порядку: смоделированные прошлые дни (с HOME_SINCE или с момента очистки журнала по вчера,
+  // кроме дней, когда приложением пользовались) + живые события. Смоделированная часть кэшируется.
+  journal() {
+    const home = this.home, yesterday = isoDate(addDays(new Date(), -1));
+    if (!this._journal || this._journalUntil !== yesterday) {
+      const live = new Set(home.liveDays || []);
+      let d = HOME_SINCE;
+      if (home.journalFrom && parseIso(home.journalFrom) >= d) d = addDays(parseIso(home.journalFrom), 1);
+      const keys = [];
+      for (; isoDate(d) <= yesterday; d = addDays(d, 1)) if (!live.has(isoDate(d))) keys.push(isoDate(d));
+      this._journal = syntheticEventHistory(this.user.id, home, keys);
+      this._journalUntil = yesterday;
+    }
+    const all = this._journal.concat(home.events);
+    return all.sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : 0));  // сортировка стабильная - время внутри дня сохраняется
+  }
+
+  clearJournal() {
+    this.home.events = [];
+    this.home.journalFrom = isoDate(addDays(new Date(), -1));  // смоделированная история до вчера тоже скрывается
+    this._journal = null;
+    Store.save();
   }
 
   // ---------- действия ----------

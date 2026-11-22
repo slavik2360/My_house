@@ -9,7 +9,7 @@ function h(tag, cls, html) {
   return e;
 }
 
-const UI = { engine: null, user: null, page: "devices", roomId: null, floor: "floor1", eventFilter: "all",
+const UI = { engine: null, user: null, page: "devices", roomId: null, floor: "floor1", eventFilter: "all", eventDays: 30,
              energyTab: "live", report: { period: "week", from: null, to: null }, reportTicks: 0,
              unread: 0, cards: {}, timer: null, sheetLive: null, sheetDeviceId: null };
 
@@ -978,22 +978,50 @@ function pageEvents(c) {
   });
   const clear = h("button", "btn danger", "Очистить");
   clear.style.padding = "8px 12px";
-  clear.addEventListener("click", () => { if (confirm("Очистить журнал событий?")) { home().events = []; Store.save(); renderPage(); } });
+  clear.addEventListener("click", () => {
+    if (confirm("Очистить журнал событий?")) { UI.engine.clearJournal(); UI.eventDays = 30; renderPage(); }
+  });
   row.append(chipsWrap, clear);
   c.appendChild(row);
   const list = h("div", "events");
   list.id = "eventsList";
-  const evs = home().events.filter(e => UI.eventFilter === "all" || e.cat === UI.eventFilter).slice().reverse();
+  const evs = UI.engine.journal().filter(e => UI.eventFilter === "all" || e.cat === UI.eventFilter).reverse();
   if (!evs.length) list.appendChild(h("div", "ev muted", "Событий пока нет"));
-  evs.forEach(e => list.appendChild(eventRow(e)));
+  // показываем последние UI.eventDays дней, остальное - по кнопке «Показать ещё»
+  let lastDay = null, shownDays = 0, hidden = false;
+  for (const e of evs) {
+    if (e.day !== lastDay) {
+      if (++shownDays > UI.eventDays) { hidden = true; break; }
+      lastDay = e.day;
+      list.appendChild(dayHeader(e.day));
+    }
+    list.appendChild(eventRow(e));
+  }
   c.appendChild(list);
+  if (hidden) {
+    const more = h("button", "btn more-events", "Показать ещё 30 дней");
+    more.addEventListener("click", () => { const y = window.scrollY; UI.eventDays += 30; renderPage(); window.scrollTo(0, y); });
+    c.appendChild(more);
+  }
 }
+const MONTHS_GENITIVE = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря"];
+const WEEKDAYS_FULL = ["Воскресенье", "Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота"];
+function dayCaption(key) {
+  if (!key) return "Без даты";
+  const d = parseIso(key), today = UI.engine.simDate();
+  const text = `${d.getDate()} ${MONTHS_GENITIVE[d.getMonth()]}` + (d.getFullYear() !== today.getFullYear() ? ` ${d.getFullYear()}` : "");
+  if (key === isoDate(today)) return "Сегодня, " + text;
+  if (key === isoDate(addDays(today, -1))) return "Вчера, " + text;
+  return `${WEEKDAYS_FULL[d.getDay()]}, ${text}`;
+}
+function dayHeader(key) { const e = h("div", "ev-day", dayCaption(key)); e.dataset.day = key || ""; return e; }
 function eventRow(e) { return h("div", "ev " + e.cat, `<span class="tm">${e.t}</span><span>${e.icon}</span><span>${esc(e.text)}</span>`); }
 function prependEvent(e) {
   const list = $("#eventsList");
   if (!list || (UI.eventFilter !== "all" && UI.eventFilter !== e.cat)) return;
-  if (list.firstChild && list.firstChild.classList.contains("muted")) list.innerHTML = "";
-  list.insertBefore(eventRow(e), list.firstChild);
+  const top = list.firstChild;
+  if (!top || !top.classList.contains("ev-day") || top.dataset.day !== e.day) { renderPage(); return; } // новый день или пустой журнал
+  list.insertBefore(eventRow(e), top.nextSibling);
 }
 
 // ---------- отчёты за период ----------
@@ -1007,6 +1035,7 @@ function reportRange() {
   if (p === "today") return [today, today];
   if (p === "week") return [addDays(today, -6), today];
   if (p === "month") return [addDays(today, -29), today];
+  if (p === "halfyear") return [addDays(today, -181), today];
   if (p === "year") return [addDays(today, -364), today];
   let a = UI.report.from ? parseIso(UI.report.from) : addDays(today, -13), b = UI.report.to ? parseIso(UI.report.to) : today;
   return a <= b ? [a, b] : [b, a];
@@ -1045,7 +1074,7 @@ function reportBuckets(start, end) {
 
 function pageReports(c) {
   const chipsRow = h("div", "chips");
-  [["today", "Сегодня"], ["week", "Неделя"], ["month", "Месяц"], ["year", "Год"], ["custom", "Свой период"]].forEach(([code, cap]) => {
+  [["today", "Сегодня"], ["week", "Неделя"], ["month", "Месяц"], ["halfyear", "Полгода"], ["year", "Год"], ["custom", "Свой период"]].forEach(([code, cap]) => {
     const b = h("button", "chip" + (UI.report.period === code ? " active" : ""), cap);
     b.addEventListener("click", () => { UI.report.period = code; renderPage(); });
     chipsRow.appendChild(b);
