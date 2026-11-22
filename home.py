@@ -17,6 +17,7 @@ os.environ.setdefault("QT_PLUGIN_PATH", _QT5_PLUGINS_DIR)
 from PyQt5.QtWidgets import *
 from PyQt5.QtGui import *
 from PyQt5.QtCore import *
+from PyQt5.QtPrintSupport import QPrinter
 
 
 def _user_data_dir():
@@ -828,21 +829,329 @@ def _clock(minute):
     return "%02d:%02d" % (minute // 60, minute % 60)
 
 
-def synthetic_event_history(user_id, devices, energy, days, tariff=DEFAULT_TARIFF_KZT):
+# ---------- паспорт устройства: покупка, цена, гарантия, обслуживание, неисправности ----------
+# Всё ниже детерминировано (зависит только от пользователя и устройства), поэтому журнал, отчёты
+# и веб-версия (web/core.js повторяет эти правила) показывают одни и те же даты и цифры.
+
+WARRANTY_MONTHS = {  # остальные типы - 12 месяцев
+    "washer": 24, "dishwasher": 24, "fridge": 24, "tv": 24, "robot_vacuum": 24, "floor_washer": 24, "lawn_mower": 24,
+    "irrigation": 24, "dehumidifier": 24, "air_purifier": 24, "door_lock": 24, "safe": 24, "air_conditioner": 36,
+    "ev_charger": 36, "water_heater": 36, "inverter": 60, "battery_bms": 120,
+}
+TYPE_PRICE_KZT = {  # ориентировочные цены, ₸
+    "washer": 230000, "robot_vacuum": 180000, "floor_washer": 150000, "vacuum": 120000, "camera": 25000,
+    "doorbell": 35000, "door_lock": 90000, "safe": 70000, "temp_sensor": 9000, "presence_sensor": 25000,
+    "smoke_sensor": 12000, "door_sensor": 7000, "leak_sensor": 9000, "light_sensor": 8000, "motion_sensor": 9000,
+    "speaker": 80000, "tv": 280000, "humidifier": 30000, "heater": 45000, "aroma": 15000, "air_conditioner": 260000,
+    "fan": 30000, "air_purifier": 70000, "dehumidifier": 90000, "router": 40000, "gateway": 30000, "repeater": 15000,
+    "light_strip": 18000, "desk_lamp": 25000, "bedside_lamp": 20000, "ceiling_light": 45000, "spot_light": 9000,
+    "bulb": 7000, "night_light": 8000, "socket": 7000, "switch": 9000, "remote": 8000, "panel": 40000,
+    "water_dispenser": 60000, "air_fryer": 45000, "multicooker": 40000, "fridge": 420000, "microwave": 55000,
+    "kettle": 25000, "dishwasher": 210000, "lawn_mower": 650000, "irrigation": 90000, "inverter": 900000,
+    "battery_bms": 60000, "ev_charger": 400000, "water_heater": 120000,
+}
+SOLAR_SYSTEM_COST_KZT = 4_500_000   # солнечные панели 6 кВт и аккумулятор 30 кВт·ч (инвертор - отдельным устройством)
+
+# Регламентное обслуживание: тип -> (раз в сколько дней, что сделать)
+MAINTENANCE = {
+    "air_conditioner": (90, "чистка фильтров внутреннего блока"),
+    "robot_vacuum": (60, "чистка щётки и замена фильтра"),
+    "vacuum": (90, "чистка фильтра и контейнера"),
+    "floor_washer": (30, "самоочистка и замена фильтра"),
+    "humidifier": (60, "замена фильтра-испарителя"),
+    "air_purifier": (120, "замена HEPA-фильтра"),
+    "washer": (90, "чистка фильтра слива и уплотнителя"),
+    "dishwasher": (30, "чистка фильтра и форсунок"),
+    "kettle": (45, "удаление накипи"),
+    "fridge": (180, "чистка уплотнителя и решётки"),
+    "lawn_mower": (60, "заточка ножей"),
+    "irrigation": (90, "промывка фильтров и форсунок"),
+    "smoke_sensor": (30, "проверка датчика кнопкой «Тест»"),
+    "inverter": (180, "осмотр инвертора и чистка панелей"),
+    "ev_charger": (180, "проверка кабеля и разъёма"),
+    "heater": (180, "очистка от пыли"),
+    "water_heater": (180, "слив осадка, проверка анода"),
+    "camera": (180, "протирка объектива, проверка записи"),
+}
+# Сколько дней держит батарейка (у устройств с батарейным питанием)
+BATTERY_LIFE_DAYS = {"motion_sensor": 215, "door_lock": 300, "smoke_sensor": 1500, "leak_sensor": 600,
+                     "temp_sensor": 420, "door_sensor": 700, "presence_sensor": 500, "safe": 900, "light_sensor": 800,
+                     "remote": 700, "doorbell": 240}
+BATTERY_LOW = 20
+# Устройства, появившиеся в базе до этого дня (когда в программе появилась полугодовая история), и стартовые
+# устройства считаются установленными с HOME_SINCE; добавленные позже - в реальный день добавления
+HISTORY_EPOCH = date(2026, 11, 22)
+SEED_KEYS = {(room, model, name) for room, model, name, *_ in SEED_DEVICES}
+
+# Неисправности за полгода: (день от HOME_SINCE, сколько дней длилась (None - не устранена), вид, типы-кандидаты)
+INCIDENT_PLAN = [
+    (74, 3, "offline", ("leak_sensor", "door_sensor", "smoke_sensor", "temp_sensor", "motion_sensor")),
+    (128, 2, "broken", ("air_conditioner", "robot_vacuum", "washer", "dishwasher", "humidifier", "lawn_mower")),
+    (184, None, "offline", ("temp_sensor", "presence_sensor", "door_sensor", "camera", "smoke_sensor", "leak_sensor")),
+]
+FAULT_TEXTS = {  # тип -> (что случилось, как устранено)
+    "air_conditioner": ("ошибка E1: засорён фильтр, кондиционер остановился", "фильтры очищены, ошибка сброшена"),
+    "robot_vacuum": ("ошибка 5: заблокирована основная щётка", "щётка очищена от намотавшихся волос"),
+    "washer": ("ошибка E21: не сливается вода", "прочищен фильтр сливного насоса"),
+    "dishwasher": ("ошибка E24: засор слива", "прочищены фильтр и сливной шланг"),
+    "humidifier": ("не срабатывает датчик уровня воды", "датчик очищен от налёта"),
+    "lawn_mower": ("застряла у забора, буксует колесо", "робот освобождён, колёса очищены"),
+}
+DEVICE_STATES = {  # код -> (подпись, цвет)
+    "ok": ("Работает", "#00a05e"), "off": ("Выключено", "#8aa0b2"), "offline": ("Нет связи", "#e08a00"),
+    "broken": ("Неисправно", "#e5484d"),
+}
+
+
+def add_months(day, months):
+    import calendar
+    month = day.month - 1 + months
+    year = day.year + month // 12
+    month = month % 12 + 1
+    return date(year, month, min(day.day, calendar.monthrange(year, month)[1]))
+
+
+def _as_date(value):
+    if value is None or isinstance(value, date):
+        return value
+    return date.fromisoformat(str(value)[:10])
+
+
+def device_passport(user_id, device, user_created=None):
+    """
+    Паспорт устройства: когда установлено в доме и куплено, цена, серийный номер, прошивка, гарантия.
+    Стартовые устройства «появились» в доме за первые три недели после HOME_SINCE; добавленные
+    пользователем позже - в день добавления.
+    """
+    rng = random.Random(f"passport-{user_id}-{device['id']}")
+    t = device["type_code"]
+    created = _as_date(device.get("created_at"))
+    owner_since = _as_date(user_created) or HOME_SINCE
+    offset = 0 if t == "inverter" else rng.randint(0, 20)
+    seeded = (device.get("room_name"), device["model_code"], device["name"]) in SEED_KEYS
+    if created and not seeded and created > max(owner_since + timedelta(days=1), HISTORY_EPOCH):
+        added = created   # добавлено пользователем уже после появления истории - реальная дата
+    else:
+        added = HOME_SINCE + timedelta(days=offset)
+    # часть техники куплена заранее (перевезена из прошлой квартиры) - у неё гарантия кончается раньше
+    bought_earlier = t != "inverter" and rng.random() < 0.3
+    purchase = added - timedelta(days=rng.randint(200, 420) if bought_earlier else rng.randint(0, 10))
+    price = TYPE_PRICE_KZT.get(t, 20000) * (0.8 + 0.4 * rng.random())
+    price = max(990, int(round(price / 1000)) * 1000 - 10)
+    brand = re.sub(r"[^A-Z]", "", device["model_code"].split("_")[0].upper())[:4] or "DEV"
+    months = WARRANTY_MONTHS.get(t, 12)
+    life = BATTERY_LIFE_DAYS.get(t, 600) * rng.uniform(0.9, 1.1)
+    return {
+        "added": added, "purchase": purchase, "price": price, "serial": f"{brand}-{rng.getrandbits(32):08X}",
+        "firmware": f"{rng.randint(1, 4)}.{rng.randint(0, 9)}.{rng.randint(10, 99)}", "warranty_months": months,
+        "warranty_until": add_months(purchase, months), "battery_life": life, "bought_earlier": bought_earlier,
+    }
+
+
+def device_passports(user_id, devices, user_created=None):
+    return {d["id"]: device_passport(user_id, d, user_created) for d in devices}
+
+
+def synthetic_incidents(devices, passports):
+    """Неисправности за полгода по INCIDENT_PLAN: [{device_id, kind, start, end, issue, fix}] (end=None - не устранена)."""
+    result, used = [], set()
+    for offset, duration, kind, types in INCIDENT_PLAN:
+        start = HOME_SINCE + timedelta(days=offset)
+        candidates = [d for t in types for d in devices
+                      if d["type_code"] == t and d["id"] not in used and passports[d["id"]]["added"] < start - timedelta(days=7)]
+        if not candidates:
+            continue
+        d = candidates[0]
+        used.add(d["id"])
+        if kind == "broken":
+            issue, fix = FAULT_TEXTS.get(d["type_code"], ("устройство не отвечает на команды", "перезагружено, работает"))
+        elif "battery" in d["settings"]:
+            issue, fix = "нет связи со шлюзом — разрядилась батарейка", "заменена батарейка"
+        else:
+            issue, fix = "нет связи: устройство пропало из сети Wi-Fi", "перезагружен роутер, устройство снова в сети"
+        if duration is None:
+            fix = None
+            if kind == "offline":
+                issue = "нет связи со шлюзом — устройство не отвечает"
+        result.append({"device_id": d["id"], "kind": kind, "start": start,
+                       "end": start + timedelta(days=duration) if duration else None, "issue": issue, "fix": fix,
+                       "battery": fix == "заменена батарейка"})
+    return result
+
+
+def device_incidents(device, synthetic):
+    """Все неисправности устройства: смоделированные (с учётом ручного «Исправлено») + отмеченные вручную."""
+    s = device["settings"]
+    resolved = s.get("resolved", {})
+    result = []
+    for inc in synthetic:
+        if inc["device_id"] != device["id"]:
+            continue
+        inc = dict(inc)
+        if inc["end"] is None and inc["start"].isoformat() in resolved:
+            inc["end"] = _as_date(resolved[inc["start"].isoformat()])
+            inc["fix"] = "отмечено исправленным вручную"
+        result.append(inc)
+    for inc in s.get("incidents", []):
+        result.append({"device_id": device["id"], "kind": inc.get("kind", "broken"), "start": _as_date(inc["start"]),
+                       "end": _as_date(inc.get("end")), "issue": inc.get("issue", ""), "fix": inc.get("fix"),
+                       "manual": True, "battery": False})
+    result.sort(key=lambda i: i["start"])
+    return result
+
+
+def active_incident(incidents, day):
+    active = [i for i in incidents if i["start"] <= day and (i["end"] is None or i["end"] > day)]
+    return active[-1] if active else None
+
+
+def device_state(device, incidents, day):
+    """Код состояния устройства на дату: broken / offline / ok / off."""
+    inc = active_incident(incidents, day)
+    if inc:
+        return inc["kind"]
+    return "ok" if device["is_on"] else "off"
+
+
+def battery_level(device, passport, incidents, day):
+    """Заряд батарейки, % (None - устройство без батарейки). Разряжается со дня установки или последней замены."""
+    s = device["settings"]
+    if "battery" not in s:
+        return None
+    since = passport["added"]
+    for inc in incidents:
+        if inc.get("battery") and inc["end"] and inc["end"] <= day:
+            since = max(since, inc["end"])
+    if s.get("battery_since"):
+        since = max(since, _as_date(s["battery_since"]))
+    return int(max(3, min(100, round(100 - (day - since).days / passport["battery_life"] * 100))))
+
+
+def battery_days_left(level, passport):
+    return max(0, int((level - 3) / 100 * passport["battery_life"]))
+
+
+def service_dates(user_id, device, passport, until):
+    """Даты выполненного обслуживания по регламенту (иногда обслуживание пропускают) + отметка вручную."""
+    spec = MAINTENANCE.get(device["type_code"])
+    if not spec:
+        return []
+    interval = spec[0]
+    result = []
+    k = 1
+    skipped = False
+    while True:
+        planned = passport["added"] + timedelta(days=interval * k)
+        if planned > until:
+            break
+        rng = random.Random(f"service-{user_id}-{device['id']}-{k}")
+        if skipped or rng.random() >= 0.18:   # примерно каждое шестое обслуживание пропущено, но не два подряд
+            skipped = False
+            done = planned + timedelta(days=rng.randint(0, 4))
+            if done <= until:
+                result.append(done)
+        else:
+            skipped = True
+        k += 1
+    manual = _as_date(device["settings"].get("service_done"))
+    if manual and manual <= until:
+        result.append(manual)
+    return sorted(set(result))
+
+
+def maintenance_status(user_id, device, passport, day):
+    """{task, interval, last, next, status: ok/soon/overdue, days} или None, если обслуживание не нужно."""
+    spec = MAINTENANCE.get(device["type_code"])
+    if not spec:
+        return None
+    interval, task = spec
+    done = service_dates(user_id, device, passport, day)
+    last = done[-1] if done else None
+    nxt = (last or passport["added"]) + timedelta(days=interval)
+    days = (nxt - day).days
+    status = "overdue" if days < 0 else ("soon" if days <= 7 else "ok")
+    return {"task": task, "interval": interval, "last": last, "next": nxt, "status": status, "days": days}
+
+
+def warranty_status(passport, day):
+    days = (passport["warranty_until"] - day).days
+    if days < 0:
+        return "expired", days
+    return ("ending" if days <= 60 else "active"), days
+
+
+# Устройства, которые работают круглосуточно (для них «часы работы» не показатель активности)
+ALWAYS_RUNNING_TYPES = {"fridge", "inverter", "battery_bms", "router", "gateway", "repeater", "camera", "doorbell",
+                        "door_lock", "safe", "temp_sensor", "presence_sensor", "smoke_sensor", "door_sensor",
+                        "leak_sensor", "light_sensor", "motion_sensor", "socket", "switch", "panel"}
+
+
+def _usage_hours(t, day, summer, sunny):
+    """Сколько часов в сутки устройство в среднем работает на номинальной мощности (оценка для разбивки расхода)."""
+    weekend = day.weekday() >= 5
+    warm, cold, hot = 5 <= day.month <= 9, summer < 0.35, summer > 0.8 and sunny > 0.65
+    if t in ALWAYS_RUNNING_TYPES:
+        return 24
+    table = {
+        "tv": 5 if weekend else 3.5, "speaker": 3, "bulb": 6 if summer < 0.6 else 3.5, "ceiling_light": 5,
+        "spot_light": 4, "desk_lamp": 3, "bedside_lamp": 1, "night_light": 8, "kettle": 0.25,
+        "light_strip": 4 if (warm and weekend) or day.month == 12 else 0.3,
+        "washer": 0.9 if weekend else 0.5, "dishwasher": 1.6, "vacuum": 0.4 if weekend else 0.1, "robot_vacuum": 2,
+        "floor_washer": 0.5, "air_conditioner": 5 if hot else (1.2 if summer > 0.62 else 0),
+        "heater": 6 if cold else (1 if summer < 0.5 else 0), "humidifier": 12 if cold else 6,
+        "ev_charger": 1.5 if sunny > 0.7 and summer > 0.4 else 0.3, "lawn_mower": 1.5 if warm else 0,
+        "irrigation": 0.3 if warm else 0, "water_heater": 3, "microwave": 0.3, "multicooker": 1, "air_fryer": 0.3,
+        "water_dispenser": 6, "fan": 6 if hot else 0, "air_purifier": 10, "dehumidifier": 3 if warm else 1, "aroma": 4,
+    }
+    return table.get(t, 2)
+
+
+def device_energy_split(devices, passports, incidents_by_device, day, consumed, generated=None):
+    """
+    Оценка, сколько энергии за день потребило каждое устройство: {id устройства: Вт·ч, "other": Вт·ч}.
+    Реальных счётчиков на каждом устройстве нет, поэтому берётся мощность модели × типичные часы работы
+    (с учётом сезона), а затем всё масштабируется так, чтобы сумма совпала с потреблением дома за день.
+    «other» - фоновое потребление дома (розетки, обычные лампы, роутер провайдера и т.п.).
+    """
+    summer = 0.5 + 0.5 * math.cos(2 * math.pi * (day.timetuple().tm_yday - 172) / 365)
+    sunny = 0.8 if generated is None else generated / (SOLAR_PEAK_W * (1.6 + 4.2 * summer))
+    raw = {}
+    for d in devices:
+        if passports[d["id"]]["added"] > day:
+            continue
+        if active_incident(incidents_by_device.get(d["id"], []), day):
+            continue
+        model = MODELS.get(d["model_code"])
+        if not model:
+            continue
+        t = d["type_code"]
+        raw[d["id"]] = model["power"] * DUTY_CYCLE.get(t, 1.0) * _usage_hours(t, day, summer, sunny)
+    other = BASE_LOAD_W * 24 + 1500
+    total = sum(raw.values()) + other
+    k = consumed / total if total else 0.0
+    result = {key: value * k for key, value in raw.items()}
+    result["other"] = other * k
+    return result
+
+
+def synthetic_event_history(user_id, devices, energy, days, tariff=DEFAULT_TARIFF_KZT, user_created=None):
     """
     Правдоподобный журнал событий за прошлые дни days - как будто домом пользуются с HOME_SINCE.
     События согласованы с энергоисторией energy ({дата: (выработка, потребление, из сети, в сеть)}):
     в солнечные дни АКБ заряжается полностью и авто заряжается от излишков, в пасмурные - дом берёт
     энергию из сети и срабатывает эко-режим; летом полив и газонокосилка, зимой обогреватель.
+    Плюс неисправности (INCIDENT_PLAN) и регламентное обслуживание - в те же даты, что и в отчётах.
     Возвращает [(дата, "ЧЧ:ММ", категория, значок, текст)]; для каждого дня ряд детерминирован.
     """
     by_type = {}
     for d in devices:
         by_type.setdefault(d["type_code"], []).append(d)
-    # устройства появлялись в доме постепенно, за первые три недели (инвертор - с первого дня)
-    order_rng = random.Random(f"devices-added-{user_id}")
-    added = {d["id"]: HOME_SINCE + timedelta(days=0 if d["type_code"] == "inverter" else order_rng.randint(0, 20))
-             for d in devices}
+    passports = device_passports(user_id, devices, user_created)
+    added = {d["id"]: passports[d["id"]]["added"] for d in devices}
+    incidents = synthetic_incidents(devices, passports)
+    incidents_by_device = {d["id"]: device_incidents(d, incidents) for d in devices}
+    services = {d["id"]: set(service_dates(user_id, d, passports[d["id"]], days[-1] if days else HOME_SINCE))
+                for d in devices}
     washer_modes = [m for m, _ in TYPE_MODES["washer"]]
     result = []
     for day in days:
@@ -853,7 +1162,23 @@ def synthetic_event_history(user_id, devices, energy, days, tariff=DEFAULT_TARIF
             events.append((int(max(0, min(1439, minute))), category, icon, text))
 
         def present(type_code):
-            return [d for d in by_type.get(type_code, []) if added[d["id"]] <= day]
+            # устройство уже установлено и в этот день исправно
+            return [d for d in by_type.get(type_code, [])
+                    if added[d["id"]] <= day and not active_incident(incidents_by_device[d["id"]], day)]
+
+        for inc in incidents:
+            d = next((x for x in devices if x["id"] == inc["device_id"]), None)
+            if d is None:
+                continue
+            if inc["start"] == day:
+                icon = "📵" if inc["kind"] == "offline" else "⚠️"
+                add(rng.randint(420, 1200), "device", icon, f"{d['name']}: {inc['issue']}")
+            if inc["end"] == day and inc["fix"]:
+                add(rng.randint(600, 1140), "device", "✅", f"{d['name']}: исправлено — {inc['fix']}")
+        for d in devices:
+            if day in services[d["id"]]:
+                add(rng.randint(600, 1200), "device", "🧰",
+                    f"{d['name']}: выполнено обслуживание — {MAINTENANCE[d['type_code']][1]}")
 
         def toggle(d, minute, on=True):
             add(minute, "device", "🟢" if on else "⚪", f"{'Включено' if on else 'Выключено'}: {d['name']} ({d['room_name']})")
@@ -1144,6 +1469,7 @@ class Database:
                 user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                 sim_time TEXT NOT NULL,
                 day TEXT,
+                synthetic INTEGER NOT NULL DEFAULT 0,
                 category TEXT NOT NULL,
                 icon TEXT NOT NULL,
                 text TEXT NOT NULL,
@@ -1173,7 +1499,9 @@ class Database:
         "total_export_wh": "REAL NOT NULL DEFAULT 0",
         "seed_version": "INTEGER NOT NULL DEFAULT 0",
         "events_until": "TEXT",  # по какой день журнал уже дописан смоделированной историей
+        "history_version": "INTEGER NOT NULL DEFAULT 0",  # версия правил смоделированного журнала
     }
+    HISTORY_VERSION = 3  # 2: неисправности и обслуживание в журнале, даты установки из паспорта; 3: обслуживание без двух пропусков подряд
 
     def migrate(self):
         """Добавить новые столбцы в уже существующую базу (без потери данных)."""
@@ -1192,6 +1520,10 @@ class Database:
         if "day" not in event_columns:
             self.conn.execute("ALTER TABLE events ADD COLUMN day TEXT")
         self.conn.execute("UPDATE events SET day = substr(created_at, 1, 10) WHERE day IS NULL")
+        if "synthetic" not in event_columns:
+            # смоделированные события записывались со временем создания «дата + время события + :00»
+            self.conn.execute("ALTER TABLE events ADD COLUMN synthetic INTEGER NOT NULL DEFAULT 0")
+            self.conn.execute("UPDATE events SET synthetic = 1 WHERE created_at = day || 'T' || sim_time || ':00'")
         self.conn.execute("CREATE INDEX IF NOT EXISTS events_by_day ON events (user_id, day, sim_time)")
         # история энергии начинается с HOME_SINCE - более ранние дни (старые версии писали с 2025 года) убираем
         self.conn.execute("DELETE FROM energy_days WHERE day < ?", (HOME_SINCE.isoformat(),))
@@ -1310,25 +1642,44 @@ class Database:
         ).fetchall()
         return [dict(row) for row in reversed(rows)]
 
+    def get_events_between(self, user_id, start, end):
+        """Все события за период (для отчётов), по порядку."""
+        rows = self.conn.execute(
+            "SELECT * FROM events WHERE user_id = ? AND day BETWEEN ? AND ? ORDER BY day, sim_time, id",
+            (user_id, start.isoformat(), end.isoformat())
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     def backfill_event_history(self, user_id, devices, until, tariff):
         """
         Дописать журнал за прошлые дни, когда программой не пользовались (с HOME_SINCE или с последней
         дописанной даты по until). Дни, в которых уже есть настоящие события, не трогаем.
+        Если правила моделирования поменялись (HISTORY_VERSION), смоделированная часть строится заново.
         """
-        row = self.conn.execute("SELECT events_until FROM users WHERE id = ?", (user_id,)).fetchone()
+        row = self.conn.execute("SELECT events_until, history_version, created_at FROM users WHERE id = ?",
+                                (user_id,)).fetchone()
+        events_until = row["events_until"]
+        if row["history_version"] < self.HISTORY_VERSION:
+            self.conn.execute("DELETE FROM events WHERE user_id = ? AND synthetic = 1", (user_id,))
+            self.conn.execute("UPDATE users SET history_version = ? WHERE id = ?", (self.HISTORY_VERSION, user_id))
+            events_until = None
         start = HOME_SINCE
-        if row["events_until"]:
-            start = max(start, date.fromisoformat(row["events_until"]) + timedelta(days=1))
+        if events_until:
+            start = max(start, date.fromisoformat(events_until) + timedelta(days=1))
         if start > until:
+            self.conn.commit()
             return
-        busy = {r[0] for r in self.conn.execute("SELECT DISTINCT day FROM events WHERE user_id = ?", (user_id,))}
+        busy = {r[0] for r in self.conn.execute("SELECT DISTINCT day FROM events WHERE user_id = ? AND synthetic = 0",
+                                                (user_id,))}
         days = [start + timedelta(days=i) for i in range((until - start).days + 1)]
         days = [d for d in days if d.isoformat() not in busy]
         energy = self.get_energy_days(user_id, start, until)
+        history = synthetic_event_history(user_id, devices, energy, days, tariff, row["created_at"])
         rows = [(user_id, d.isoformat(), sim_time, category, icon, text, f"{d.isoformat()}T{sim_time}:00")
-                for d, sim_time, category, icon, text in synthetic_event_history(user_id, devices, energy, days, tariff)]
+                for d, sim_time, category, icon, text in history]
         self.conn.executemany(
-            "INSERT INTO events (user_id, day, sim_time, category, icon, text, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)", rows
+            "INSERT INTO events (user_id, day, sim_time, category, icon, text, created_at, synthetic) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, 1)", rows
         )
         self.conn.execute("UPDATE users SET events_until = ? WHERE id = ?", (until.isoformat(), user_id))
         self._trim_events(user_id)
@@ -2161,6 +2512,14 @@ def device_status_html(device, reading=None):
     s = device["settings"]
     type_code = device["type_code"]
     group = DEVICE_TYPES[type_code]["group"]
+
+    if device.get("_state") == "broken":
+        return f"<span style='color:#e5484d; font-weight:700;'>⚠️ Неисправно</span> · {device.get('_issue', '')}"
+    if device.get("_state") == "offline":
+        return "<span style='color:#e08a00; font-weight:700;'>📵 Нет связи</span> · устройство не отвечает"
+    if s.get("battery") is not None and s["battery"] < BATTERY_LOW and device["is_on"]:
+        return (f"<span style='color:#e08a00; font-weight:700;'>🪫 Батарейка {s['battery']}%</span> · "
+                f"{reading or 'замените батарейку'}")
 
     if type_code == "irrigation":
         model_info = MODELS.get(device["model_code"], {})
@@ -5076,6 +5435,7 @@ class DeviceControlDialog(QDialog):
         scroll.setWidget(host)
         outer.addWidget(scroll, 1)
         self.build_controls()
+        self.build_service_controls()
         self.controls.addStretch()
 
         # Нижние кнопки
@@ -5666,7 +6026,11 @@ class DeviceControlDialog(QDialog):
         power = device_power(self.device)
         reading = self.main.readings.get(self.device["id"])
         parts = []
-        if not self.device["is_on"]:
+        if self.device.get("_state") in ("broken", "offline"):
+            parts.append("<b style='color:#e5484d;'>⚠️ Неисправно</b>" if self.device["_state"] == "broken"
+                         else "<b style='color:#e08a00;'>📵 Нет связи</b>")
+            parts.append(esc(self.device.get("_issue", "")))
+        elif not self.device["is_on"]:
             parts.append("<b>Выключено</b>")
         else:
             if reading:
@@ -5696,6 +6060,83 @@ class DeviceControlDialog(QDialog):
     def delete(self):
         if self.main.delete_device(self.device):
             self.reject()
+
+    # ---------- состояние, гарантия, обслуживание ----------
+
+    FAULT_CHOICES = ["Не включается", "Не отвечает на команды", "Нет связи с устройством", "Ошибка на дисплее / индикаторе",
+                     "Посторонний шум или запах", "Механическое повреждение"]
+
+    def build_service_controls(self):
+        box = self._section("🛠 Состояние, гарантия и обслуживание")
+        self.service_info = QLabel()
+        self.service_info.setTextFormat(Qt.RichText)
+        self.service_info.setWordWrap(True)
+        self.service_info.setStyleSheet("background: #ffffff; border: 1px solid #dfe8ef; border-radius: 12px; "
+                                        "padding: 10px 14px; font-size: 13px;")
+        box.addWidget(self.service_info)
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        self.fault_btn = QPushButton()
+        self.fault_btn.setCursor(Qt.PointingHandCursor)
+        self.fault_btn.clicked.connect(self.toggle_fault)
+        row.addWidget(self.fault_btn)
+        if self.device["type_code"] in MAINTENANCE:
+            service_btn = QPushButton("🧰 Обслуживание выполнено")
+            service_btn.setObjectName("secondary")
+            service_btn.setCursor(Qt.PointingHandCursor)
+            service_btn.clicked.connect(lambda: (self.main.mark_service_done(self.device), self._refresh_service()))
+            row.addWidget(service_btn)
+        if "battery" in self.s:
+            battery_btn = QPushButton("🔋 Батарейка заменена")
+            battery_btn.setObjectName("secondary")
+            battery_btn.setCursor(Qt.PointingHandCursor)
+            battery_btn.clicked.connect(lambda: (self.main.mark_battery_replaced(self.device), self._refresh_service()))
+            row.addWidget(battery_btn)
+        box.addLayout(row)
+        self._refresh_service()
+
+    def _refresh_service(self):
+        info = self.main.device_info(self.device)
+        p, inc, m = info["passport"], info["incident"], info["maintenance"]
+        label, color = DEVICE_STATES[info["state"]]
+        lines = [f"<b>Состояние:</b> <span style='color:{color}; font-weight:700;'>{label}</span>"
+                 + (f" с {fmt_date(inc['start'])} — {esc(inc['issue'])}" if inc else "")]
+        if info["battery"] is not None:
+            lines.append(f"<b>Батарейка:</b> {battery_html(info['battery'])} · хватит примерно на "
+                         f"{days_text(battery_days_left(info['battery'], p))}")
+        lines.append(f"<b>Куплено:</b> {fmt_date(p['purchase'])} за {format_money(p['price'])} · установлено "
+                     f"{fmt_date(p['added'])}")
+        w_status, w_days = info["warranty"]
+        w_text = {"active": f"<span style='color:#00a05e;'>до {fmt_date(p['warranty_until'])}</span>",
+                  "ending": f"<span style='color:#e08a00;'><b>до {fmt_date(p['warranty_until'])}</b> — осталось "
+                            f"{days_text(w_days)}</span>",
+                  "expired": f"<span style='color:#8aa0b2;'>истекла {fmt_date(p['warranty_until'])}</span>"}[w_status]
+        lines.append(f"<b>Гарантия</b> ({p['warranty_months']} мес.): {w_text}")
+        if m:
+            last = fmt_date(m["last"]) if m["last"] else "ещё не проводилось"
+            lines.append(f"<b>Обслуживание:</b> {m['task']} раз в {m['interval']} дн. · последнее {last} · "
+                         f"{maintenance_html(m)}")
+        lines.append(f"<span style='color:#8aa0b2;'>Серийный номер {p['serial']} · прошивка {p['firmware']}</span>")
+        self.service_info.setText("<br>".join(lines))
+        if info["state"] in ("broken", "offline"):
+            self.fault_btn.setText("✅ Исправлено")
+            self.fault_btn.setStyleSheet("")
+        else:
+            self.fault_btn.setText("⚠️ Отметить неисправным")
+            self.fault_btn.setStyleSheet("background-color: #e5484d;")
+
+    def toggle_fault(self):
+        info = self.main.device_info(self.device)
+        if info["state"] in ("broken", "offline"):
+            self.main.mark_device_fixed(self.device)
+        else:
+            issue, ok = QInputDialog.getItem(self, "Неисправность", "Что случилось с устройством?", self.FAULT_CHOICES,
+                                             0, True)
+            if not ok or not issue.strip():
+                return
+            self.main.mark_device_fault(self.device, issue.strip()[:80])
+        self._refresh_service()
+        self.refresh_live()
 
 
 ####################################
@@ -6973,6 +7414,1324 @@ class EventsPage(QWidget):
 
 
 ####################################
+############ ОТЧЁТЫ PDF ############
+####################################
+# Три отчёта: о состоянии устройств, об электроэнергии и сводный о состоянии умного дома.
+# collect_report() собирает все цифры (без Qt), report_html_*() строят HTML, ReportPdf печатает его
+# в PDF формата A4 с шапкой и номерами страниц. Веб-версия (web/reports.js) повторяет ту же логику.
+
+REPORT_KINDS = [
+    ("devices", "Отчёт о состоянии устройств", "📋",
+     "Какие устройства работают, выключены, без связи или неисправны; где они стоят, заряд батареек, "
+     "активность за период, проблемы и что с ними сделать."),
+    ("energy", "Отчёт об электроэнергии", "⚡",
+     "Выработка панелей, потребление, сеть и аккумулятор; счёт и экономия в тенге; сравнение с прошлым периодом; "
+     "кто и где потребляет больше всего; рекомендации по экономии."),
+    ("home", "Отчёт о состоянии умного дома", "🏠",
+     "Главный сводный отчёт: общая оценка дома, энергосистема, устройства, безопасность, гарантия и "
+     "обслуживание, важные события и рекомендации."),
+]
+REPORT_TITLES = {code: title for code, title, _, _ in REPORT_KINDS}
+REPORT_PERIOD_CHOICES = [("week", "Неделя", 7), ("month", "Месяц", 30), ("halfyear", "Полгода", 182),
+                         ("year", "Год", 365), ("custom", "Свой период", 0)]
+IMPORTANT_ICONS = {"📵", "⚠️", "✅", "🧰", "🌿", "🔌", "🪫", "➕", "🗑"}
+SECURITY_TYPES = ["door_lock", "camera", "doorbell", "safe", "smoke_sensor", "leak_sensor", "motion_sensor",
+                  "door_sensor", "presence_sensor"]
+SEVERITY = {"high": ("Срочно", "#e5484d"), "medium": ("Важно", "#e08a00"), "low": ("Планово", "#3f8fd2")}
+
+
+def fmt_date(d):
+    return d.strftime("%d.%m.%Y") if d else "—"
+
+
+def fmt_dm(d):
+    return f"{d.day} {MONTHS_GENITIVE[d.month - 1]}"
+
+
+def fmt_kwh(wh, digits=1):
+    return kwh_text(wh, digits)
+
+
+def fmt_pct(x):
+    return f"{x:.0f}%"
+
+
+def days_text(n):
+    return f"{n} {plural(n, 'день', 'дня', 'дней')}"
+
+
+def change_text(now, before, unit_fmt, more="больше", less="меньше"):
+    """«на 12% больше, чем в прошлом периоде (1 234 кВт·ч)»; before=None - сравнивать не с чем."""
+    if not before:
+        return "сравнить не с чем — в прошлом периоде система ещё не работала"
+    pct = (now - before) / before * 100
+    if abs(pct) < 1:
+        return f"почти столько же, сколько в прошлом периоде ({unit_fmt(before)})"
+    return f"на {abs(pct):.0f}% {more if pct > 0 else less}, чем в прошлом периоде ({unit_fmt(before)})"
+
+
+def energy_buckets(days, start, end, tariff):
+    """Столбики для графика: по дням (до 62 дней) или по месяцам."""
+    mk = lambda label, title, v: {"label": label, "title": title, "gen": v[0], "cons": v[1], "imp": v[2], "exp": v[3],
+                                  "cost": v[2] / 1000 * tariff}
+    if (end - start).days <= 62:
+        out = []
+        d = start
+        while d <= end:
+            if d in days:
+                out.append(mk(d.strftime("%d.%m"), d.strftime("%d.%m.%Y"), days[d]))
+            d += timedelta(days=1)
+        return out
+    months = {}
+    for d, v in sorted(days.items()):
+        if start <= d <= end:
+            m = months.setdefault((d.year, d.month), [0.0, 0.0, 0.0, 0.0])
+            for k in range(4):
+                m[k] += v[k]
+    return [mk(f"{MONTHS_SHORT[mo - 1]} {str(y)[2:]}", f"{MONTHS_FULL[mo - 1].capitalize()} {y}", v)
+            for (y, mo), v in sorted(months.items())]
+
+
+def collect_report(ctx):
+    """
+    Все данные для трёх отчётов. ctx: user_id, owner, user_created, devices, rooms, days {дата: (выработка,
+    потребление, из сети, в сеть)} (включая прошлый период), events [{day, sim_time, category, icon, text}] за период,
+    start, end, today, tariff, eco_mode, battery_level (0..1), generated_at (datetime).
+    """
+    devices, today, tariff = ctx["devices"], ctx["today"], ctx["tariff"]
+    start, end = ctx["start"], ctx["end"]
+    n_days = (end - start).days + 1
+    prev_end = start - timedelta(days=1)
+    prev_start = prev_end - timedelta(days=n_days - 1)
+    days = ctx["days"]
+    events = ctx["events"]
+    passports = device_passports(ctx["user_id"], devices, ctx.get("user_created"))
+    synthetic = synthetic_incidents(devices, passports)
+    incidents = {d["id"]: device_incidents(d, synthetic) for d in devices}
+    rooms = {r["id"]: r for r in ctx["rooms"]}
+
+    # ---------- энергия ----------
+    def period_sum(a, b):
+        vals = [v for d, v in days.items() if a <= d <= b]
+        return [sum(v[k] for v in vals) for k in range(4)], len(vals)
+
+    (gen, cons, imp, exp), n_energy = period_sum(start, end)
+    (p_gen, p_cons, p_imp, p_exp), n_prev = period_sum(prev_start, prev_end)
+    per_device, other = {}, 0.0
+    for d in sorted(days):
+        if start <= d <= end:
+            g, c, _, _ = days[d]
+            split = device_energy_split(devices, passports, incidents, d, c, g)
+            other += split.pop("other")
+            for k, v in split.items():
+                per_device[k] = per_device.get(k, 0.0) + v
+    by_room, by_group = {}, {}
+    for d in devices:
+        wh = per_device.get(d["id"], 0.0)
+        by_room[d["room_name"]] = by_room.get(d["room_name"], 0.0) + wh
+        group = DEVICE_TYPES[d["type_code"]]["group"]
+        by_group[group] = by_group.get(group, 0.0) + wh
+    by_group["Фоновое потребление дома"] = other
+    period_days = sorted(d for d in days if start <= d <= end)
+    full_days = [d for d in period_days if d != today] or period_days   # сегодняшний день ещё не закончился
+    energy = {
+        "gen": gen, "cons": cons, "imp": imp, "exp": exp, "days": n_energy,
+        # сравнивать можно, только если за прошлый период есть данные почти за все дни (система могла ещё не работать)
+        "prev": {"gen": p_gen, "cons": p_cons, "imp": p_imp, "exp": p_exp, "days": n_prev,
+                 "start": prev_start, "end": prev_end, "ok": n_prev >= n_days * 0.9},
+        "self_pct": (cons - imp) / cons * 100 if cons else 0.0,
+        "pay": imp / 1000 * tariff, "nosolar": cons / 1000 * tariff, "saved": max(0.0, cons - imp) / 1000 * tariff,
+        "co2": gen / 1000 * CO2_KG_PER_KWH, "buckets": energy_buckets(days, start, end, tariff),
+        "by_device": per_device, "other": other, "by_room": by_room, "by_group": by_group,
+        "grid_days": sum(1 for d in period_days if days[d][2] > 300),
+        "full_days": sum(1 for d in period_days if days[d][3] > 300),
+        "eco_count": sum(1 for e in events if e["text"].startswith("Эко-режим: АКБ") and "отключены" in e["text"]),
+        "best_day": max(full_days, key=lambda d: days[d][0]) if full_days else None,
+        "worst_day": min(full_days, key=lambda d: days[d][0]) if full_days else None,
+        "peak_day": max(full_days, key=lambda d: days[d][1]) if full_days else None,
+        "export_pct": exp / gen * 100 if gen else 0.0,
+    }
+    energy["trees"] = energy["co2"] / CO2_PER_TREE_KG
+    annual_saving = energy["saved"] / max(1, n_energy) * 365
+    energy["payback_years"] = SOLAR_SYSTEM_COST_KZT / annual_saving if annual_saving > 0 else None
+    energy["annual_saving"] = annual_saving
+
+    # ---------- устройства ----------
+    names = [d["name"] for d in devices]
+    rows = []
+    for d in devices:
+        p = passports[d["id"]]
+        incs = incidents[d["id"]]
+        state = device_state(d, incs, today)
+        inc = active_incident(incs, today)
+        model = MODELS.get(d["model_code"], {"name": d["model_code"], "power": 0})
+        unique = names.count(d["name"]) == 1
+
+        def mine(text, d=d, unique=unique):
+            return d["name"] in text and (unique or d["room_name"] in text)
+
+        dev_events = [e for e in events if mine(e["text"])]
+        switches = sum(1 for e in dev_events if e["text"].startswith("Включено:"))
+        wh = per_device.get(d["id"], 0.0)
+        nominal = model["power"] * DUTY_CYCLE.get(d["type_code"], 1.0)
+        room = rooms.get(d["room_id"], {})
+        bat = battery_level(d, p, incs, today)
+        rows.append({
+            "device": d, "id": d["id"], "name": d["name"], "room": d["room_name"],
+            "floor": FLOOR_NAMES.get(room.get("floor", "floor1"), ""), "type": DEVICE_TYPES[d["type_code"]]["name"],
+            "group": DEVICE_TYPES[d["type_code"]]["group"], "model": model["name"], "power_rated": model["power"],
+            "state": state, "incident": inc, "incidents": incs, "battery": bat,
+            "battery_days": battery_days_left(bat, p) if bat is not None else None,
+            "power_now": device_power(d) if state == "ok" else 0.0, "energy": wh, "cost": wh / 1000 * tariff,
+            "hours": wh / nominal if nominal > 0 else 0.0, "switches": switches, "events": len(dev_events),
+            "last_event": dev_events[-1] if dev_events else None, "passport": p,
+            "warranty": warranty_status(p, today), "maintenance": maintenance_status(ctx["user_id"], d, p, today),
+            "settings": device_status_html(d, None) if state in ("ok", "off") else "",
+        })
+    counts = {k: sum(1 for r in rows if r["state"] == k) for k in DEVICE_STATES}
+    counts["total"] = len(rows)
+    counts["low_battery"] = sum(1 for r in rows if r["battery"] is not None and r["battery"] < BATTERY_LOW)
+
+    # ---------- что требует внимания ----------
+    attention = []
+    for r in rows:
+        inc, p = r["incident"], r["passport"]
+        w_status, w_days = r["warranty"]
+        if r["state"] == "broken":
+            action = f"Устранить: {inc['issue']}. " + (
+                f"Устройство на гарантии до {fmt_date(p['warranty_until'])} — ремонт бесплатно в сервисном центре."
+                if w_status != "expired" else "Гарантия истекла — ремонт платный.")
+            attention.append(("high", r, f"Неисправно с {fmt_date(inc['start'])}: {inc['issue']}", action))
+        elif r["state"] == "offline":
+            action = ("Проверьте батарейку и расстояние до шлюза, при необходимости переподключите датчик."
+                      if r["battery"] is not None else "Проверьте питание и Wi-Fi, перезагрузите устройство.")
+            attention.append(("high", r, f"Нет связи с {fmt_date(inc['start'])} ({days_text((today - inc['start']).days)})",
+                              action))
+        if r["battery"] is not None and r["battery"] < BATTERY_LOW and r["state"] != "offline":
+            attention.append(("high" if r["battery"] < 10 else "medium", r, f"Батарейка разряжена: {r['battery']}%",
+                              f"Замените батарейку — до полного разряда ≈ {days_text(r['battery_days'])}."))
+        m = r["maintenance"]
+        if m and m["status"] == "overdue":
+            attention.append(("medium", r, f"Обслуживание просрочено на {days_text(-m['days'])}",
+                              f"Выполните: {m['task']}."))
+        elif m and m["status"] == "soon":
+            attention.append(("low", r, f"Обслуживание через {days_text(m['days'])} ({fmt_date(m['next'])})",
+                              f"Запланируйте: {m['task']}."))
+        if w_status == "ending":
+            attention.append(("low", r, f"Гарантия заканчивается {fmt_date(p['warranty_until'])}",
+                              "Проверьте устройство и обратитесь в сервис, пока действует гарантия."))
+    order = {"high": 0, "medium": 1, "low": 2}
+    attention.sort(key=lambda a: order[a[0]])
+
+    # ---------- неисправности за период ----------
+    period_incidents = []
+    for r in rows:
+        for inc in r["incidents"]:
+            if inc["start"] <= end and (inc["end"] is None or inc["end"] >= start):
+                period_incidents.append((r, inc))
+    period_incidents.sort(key=lambda x: x[1]["start"])
+
+    # ---------- безопасность ----------
+    def count(pred):
+        return sum(1 for e in events if e["category"] == "security" and pred(e))
+
+    security = {
+        "rows": [r for t in SECURITY_TYPES for r in rows if r["device"]["type_code"] == t],
+        "motion": count(lambda e: e["icon"] == "🏃"),
+        "people": count(lambda e: e["icon"] == "📹" and "звонок" not in e["text"].lower()),
+        "doorbell": count(lambda e: "звонок" in e["text"].lower()),
+        "doors": count(lambda e: e["icon"] == "🚪"),
+        "night": [e for e in events if e["category"] == "security" and e["icon"] == "📹"
+                  and (e["sim_time"] < "06:00" or e["sim_time"] >= "23:00")],
+    }
+    locks = [r for r in rows if r["device"]["type_code"] == "door_lock"]
+    security["lock_open"] = any(not r["device"]["settings"].get("locked", True) for r in locks)
+
+    # ---------- гарантия и обслуживание ----------
+    warranty_rows = sorted(rows, key=lambda r: r["passport"]["warranty_until"])
+    maintenance_rows = sorted((r for r in rows if r["maintenance"]), key=lambda r: r["maintenance"]["next"])
+    care = {
+        "value": sum(r["passport"]["price"] for r in rows),
+        "active": sum(1 for r in rows if r["warranty"][0] == "active"),
+        "ending": sum(1 for r in rows if r["warranty"][0] == "ending"),
+        "expired": sum(1 for r in rows if r["warranty"][0] == "expired"),
+        "overdue": sum(1 for r in maintenance_rows if r["maintenance"]["status"] == "overdue"),
+        "soon": sum(1 for r in maintenance_rows if r["maintenance"]["status"] == "soon"),
+        "services_done": sum(1 for e in events if e["icon"] == "🧰"),
+    }
+
+    # ---------- оценка дома ----------
+    bat_crit = sum(1 for r in rows if r["battery"] is not None and r["battery"] < 10)
+    dev_score = max(0, 100 - 25 * counts["broken"] - 15 * counts["offline"] - 10 * bat_crit
+                    - 5 * (counts["low_battery"] - bat_crit))
+    energy_score = int(min(100, round(energy["self_pct"] * 1.1)))
+    sec_bad = sum(1 for r in security["rows"] if r["state"] in ("broken", "offline"))
+    sec_low = sum(1 for r in security["rows"] if r["battery"] is not None and r["battery"] < BATTERY_LOW)
+    sec_score = max(0, 100 - 20 * sec_bad - 10 * sec_low - (30 if security["lock_open"] else 0))
+    care_score = max(0, 100 - 12 * care["overdue"] - 4 * care["soon"] - 3 * care["ending"])
+    total = round(0.3 * dev_score + 0.3 * energy_score + 0.2 * sec_score + 0.2 * care_score)
+    score = {"total": total, "parts": [("Устройства", dev_score, 30), ("Энергия", energy_score, 30),
+                                       ("Безопасность", sec_score, 20), ("Гарантия и обслуживание", care_score, 20)]}
+
+    important = [e for e in events if e["icon"] in IMPORTANT_ICONS or e in security["night"]]
+
+    report = {
+        "ctx": ctx, "owner": ctx["owner"], "start": start, "end": end, "today": today, "n_days": n_days,
+        "tariff": tariff, "rows": rows, "counts": counts, "attention": attention, "period_incidents": period_incidents,
+        "energy": energy, "security": security, "warranty_rows": warranty_rows, "maintenance_rows": maintenance_rows,
+        "care": care, "score": score, "important": important, "rooms": ctx["rooms"],
+    }
+    report["recommendations"] = report_recommendations(report)
+    return report
+
+
+def score_label(score):
+    if score >= 85:
+        return "Отличное", "#00a05e"
+    if score >= 70:
+        return "Хорошее", "#5bb318"
+    if score >= 50:
+        return "Требует внимания", "#e08a00"
+    return "Плохое", "#e5484d"
+
+
+def report_recommendations(r):
+    """Советы по данным отчёта: [(раздел, текст)]."""
+    recs = []
+    e, ctx = r["energy"], r["ctx"]
+    for severity, row, problem, action in r["attention"]:
+        if severity in ("high", "medium"):
+            recs.append(("devices", f"{row['name']} ({row['room']}): {problem.lower()}. {action}"))
+    month = 30 / max(1, e["days"])
+    if e["cons"] and e["imp"] / e["cons"] > 0.2:
+        shift = sum(row["energy"] for row in r["rows"] if row["device"]["type_code"] in ("washer", "dishwasher")) * 0.5
+        text = (f"{e['imp'] / e['cons'] * 100:.0f}% энергии куплено из сети — в основном ночью и в пасмурные дни "
+                f"({days_text(e['grid_days'])} из {e['days']}).")
+        if shift > 0:
+            text += (f" Запускайте стирку и посудомойку днём (11:00–16:00), когда работают панели: это примерно "
+                     f"{fmt_kwh(shift * month)} и ≈ {format_money(shift * month / 1000 * r['tariff'])} в месяц.")
+        recs.append(("energy", text))
+    heaters = [row for row in r["rows"] if row["device"]["type_code"] == "heater" and row["energy"] > 0]
+    if heaters and e["cons"]:
+        wh = sum(h["energy"] for h in heaters)
+        if wh / e["cons"] > 0.25:
+            recs.append(("energy", f"Обогрев — {wh / e['cons'] * 100:.0f}% потребления дома. Снижение температуры на 1 °C "
+                                   f"экономит около 6% энергии на отопление — ≈ {format_money(wh * 0.06 * month / 1000 * r['tariff'])} "
+                                   f"в месяц."))
+    if e["gen"] and e["export_pct"] > 15:
+        recs.append(("energy", f"{e['export_pct']:.0f}% выработки ({fmt_kwh(e['exp'])}) ушло в сеть бесплатно: аккумулятор "
+                               f"был полон. В солнечные дни включайте мощные приборы и зарядку авто днём."))
+    if not ctx.get("eco_mode"):
+        recs.append(("energy", "Эко-режим выключен. Включите его, чтобы при низком заряде АКБ второстепенные мощные "
+                               "приборы отключались автоматически и дом реже переходил на сеть."))
+    for row in r["rows"]:
+        if row["device"]["type_code"] == "ev_charger" and not row["device"]["settings"].get("solar_only"):
+            recs.append(("energy", f"{row['name']}: включите режим «Только от излишков солнца» — авто будет заряжаться "
+                                   f"бесплатной энергией панелей."))
+    if r["security"]["lock_open"]:
+        recs.append(("security", "Входной замок открыт — закройте его или включите автозакрытие."))
+    if r["security"]["night"]:
+        recs.append(("security", f"Ночью камеры {len(r['security']['night'])} раз замечали человека — просмотрите записи "
+                                 f"за эти даты (список в разделе «Безопасность»)."))
+    ending = [row for row in r["rows"] if row["warranty"][0] == "ending"]
+    if ending:
+        recs.append(("care", "Скоро заканчивается гарантия: " + ", ".join(
+            f"{row['name']} ({fmt_date(row['passport']['warranty_until'])})" for row in ending)
+                     + ". Проверьте эти устройства, пока ремонт бесплатный."))
+    if not recs:
+        recs.append(("home", "Замечаний нет: устройства исправны, обслуживание выполнено вовремя."))
+    return recs
+
+
+# ---------- графики для PDF (рисуются в картинки и вставляются в документ) ----------
+
+class ReportCharts:
+    """Рисует графики в QImage (в 2 раза крупнее для чёткости) и отдаёт тег <img> для HTML отчёта."""
+
+    def __init__(self):
+        self.images = {}
+
+    @staticmethod
+    def _font(size, bold=False):
+        f = QFont("Segoe UI")
+        f.setPixelSize(size)
+        f.setBold(bold)
+        return f
+
+    def _canvas(self, w, h):
+        # картинка вдвое крупнее (для чёткости в PDF), в документе она масштабируется до w×h
+        img = QImage(int(w * 2), int(h * 2), QImage.Format_ARGB32)
+        img.fill(Qt.white)
+        return img
+
+    @staticmethod
+    def _painter(img):
+        p = QPainter(img)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.TextAntialiasing)
+        p.scale(2, 2)
+        return p
+
+    def _tag(self, img, w, h):
+        name = f"chart{len(self.images) + 1}.png"
+        self.images[name] = img
+        # в ячейке таблицы - иначе QTextDocument оставляет над картинкой пустое место
+        return (f'<table cellspacing="0" cellpadding="0"><tr><td>'
+                f'<img src="{name}" width="{int(w)}" height="{int(h)}"></td></tr></table>')
+
+    def energy(self, buckets, w=690, h=250):
+        chart = ReportChart()
+        chart.setMinimumHeight(0)
+        chart.resize(int(w), int(h))
+        chart.set_data(buckets)
+        img = self._canvas(w, h)
+        p = self._painter(img)
+        chart.render(p, QPoint(), QRegion(), QWidget.RenderFlags(QWidget.DrawChildren))
+        p.end()
+        chart.deleteLater()
+        return self._tag(img, w, h)
+
+    def hbars(self, items, w=690, label_w=230, row_h=24, max_value=None):
+        """Горизонтальные полосы: items = [(подпись, значение, цвет, текст справа)]."""
+        if not items:
+            return ""
+        h = row_h * len(items) + 6
+        img = self._canvas(w, h)
+        p = self._painter(img)
+        top = max_value or max(v for _, v, _, _ in items) or 1
+        text_w = 150
+        bar_w = w - label_w - text_w - 16
+        for i, (label, value, color, text) in enumerate(items):
+            y = 3 + i * row_h
+            p.setFont(self._font(12))
+            p.setPen(QColor("#1d3346"))
+            p.drawText(QRectF(0, y, label_w - 8, row_h), Qt.AlignRight | Qt.AlignVCenter,
+                       QFontMetrics(self._font(12)).elidedText(label, Qt.ElideRight, label_w - 10))
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor("#eef3f7"))
+            p.drawRoundedRect(QRectF(label_w, y + 5, bar_w, row_h - 10), 4, 4)
+            p.setBrush(QColor(color))
+            p.drawRoundedRect(QRectF(label_w, y + 5, max(3.0, bar_w * min(1.0, value / top)), row_h - 10), 4, 4)
+            p.setPen(QColor("#3f5e75"))
+            p.setFont(self._font(11, True))
+            p.drawText(QRectF(label_w + bar_w + 8, y, text_w, row_h), Qt.AlignLeft | Qt.AlignVCenter, text)
+        p.end()
+        return self._tag(img, w, h)
+
+    def donut(self, items, w=690, h=170, center="", sub=""):
+        """Кольцевая диаграмма с легендой справа: items = [(подпись, значение, цвет, текст)]."""
+        img = self._canvas(w, h)
+        p = self._painter(img)
+        size = h - 16
+        ring = QRectF(8 + 14, 8 + 14, size - 28, size - 28)
+        total = sum(v for _, v, _, _ in items) or 1
+        angle = 90 * 16
+        pen_w = 26
+        for _, value, color, _ in items:
+            span = -int(value / total * 360 * 16)
+            if span:
+                p.setPen(QPen(QColor(color), pen_w, Qt.SolidLine, Qt.FlatCap))
+                p.drawArc(ring, angle, span)
+            angle += span
+        p.setPen(QColor("#12293c"))
+        p.setFont(self._font(22, True))
+        p.drawText(QRectF(8, 8 + size / 2 - 22, size, 28), Qt.AlignCenter, center)
+        p.setFont(self._font(10))
+        p.setPen(QColor("#6b8396"))
+        p.drawText(QRectF(8, 8 + size / 2 + 6, size, 16), Qt.AlignCenter, sub)
+        x = size + 40
+        line_h = min(24, (h - 10) / max(1, len(items)))
+        for i, (label, value, color, text) in enumerate(items):
+            y = 6 + i * line_h + max(0, (h - 12 - line_h * len(items)) / 2)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(color))
+            p.drawRoundedRect(QRectF(x, y + line_h / 2 - 6, 12, 12), 3, 3)
+            p.setPen(QColor("#1d3346"))
+            p.setFont(self._font(12))
+            p.drawText(QRectF(x + 20, y, 260, line_h), Qt.AlignLeft | Qt.AlignVCenter, label)
+            p.setFont(self._font(12, True))
+            p.drawText(QRectF(x + 280, y, w - x - 290, line_h), Qt.AlignLeft | Qt.AlignVCenter, text)
+        p.end()
+        return self._tag(img, w, h)
+
+    def gauge(self, score, color, w=170, h=170, caption="из 100"):
+        """Кольцо оценки дома 0-100."""
+        img = self._canvas(w, h)
+        p = self._painter(img)
+        ring = QRectF(16, 16, w - 32, h - 32)
+        p.setPen(QPen(QColor("#e6eef4"), 16, Qt.SolidLine, Qt.RoundCap))
+        p.drawArc(ring, 0, 360 * 16)
+        p.setPen(QPen(QColor(color), 16, Qt.SolidLine, Qt.RoundCap))
+        p.drawArc(ring, 90 * 16, -int(score / 100 * 360 * 16))
+        p.setPen(QColor("#12293c"))
+        p.setFont(self._font(40, True))
+        p.drawText(QRectF(0, h / 2 - 34, w, 50), Qt.AlignCenter, str(score))
+        p.setFont(self._font(12))
+        p.setPen(QColor("#6b8396"))
+        p.drawText(QRectF(0, h / 2 + 14, w, 20), Qt.AlignCenter, caption)
+        p.end()
+        return self._tag(img, w, h)
+
+
+# ---------- HTML отчёта (подмножество HTML/CSS, которое понимает QTextDocument) ----------
+
+REPORT_CSS = """
+body { color: #1d3346; }
+h1 { font-size: 24px; font-weight: 800; color: #12293c; margin-top: 0px; margin-bottom: 2px; }
+h2 { font-size: 17px; font-weight: 800; color: #12293c; margin-top: 22px; margin-bottom: 8px; }
+h3 { font-size: 13px; font-weight: 700; color: #12293c; margin-top: 14px; margin-bottom: 5px; }
+p { margin-top: 0px; margin-bottom: 6px; }
+li { margin-bottom: 3px; }
+.muted { color: #6b8396; }
+.small { font-size: 10px; }
+th { background-color: #e6eff6; color: #12293c; font-weight: 700; font-size: 11px; }
+td { font-size: 11px; }
+"""
+
+
+def esc(text):
+    return (str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+
+class Html:
+    """Маленький конструктор HTML для отчётов."""
+
+    def __init__(self):
+        self.parts = []
+        self.section_no = 0
+
+    def add(self, html):
+        self.parts.append(html)
+
+    def text(self):
+        return "".join(self.parts)
+
+    def title(self, title, r, subtitle=""):
+        start, end = r["start"], r["end"]
+        self.add(f"<h1>{esc(title)}</h1>")
+        self.add(f'<p class="muted">Умный дом пользователя <b>{esc(r["owner"])}</b> · период '
+                 f'<b>{fmt_date(start)} — {fmt_date(end)}</b> ({days_text(r["n_days"])}) · сформирован '
+                 f'{r["ctx"]["generated_at"].strftime("%d.%m.%Y в %H:%M")}</p>')
+        if subtitle:
+            self.add(f'<p class="muted">{esc(subtitle)}</p>')
+
+    def section(self, title, new_page=False):
+        self.section_no += 1
+        style = ' style="page-break-before: always;"' if new_page else ""
+        self.add(f'<h2{style}><span style="color:#00a05e;">{self.section_no}.</span> {esc(title)}</h2>')
+
+    def sub(self, title):
+        self.add(f"<h3>{esc(title)}</h3>")
+
+    def p(self, html, muted=False):
+        self.add(f'<p{" class=muted" if muted else ""}>{html}</p>')
+
+    def note(self, html):
+        self.add(f'<p class="muted small">{html}</p>')
+
+    def bullets(self, items):
+        if items:
+            self.add("<ul>" + "".join(f"<li>{i}</li>" for i in items) + "</ul>")
+
+    def box(self, title, items, color="#00a05e", bg="#eefaf4"):
+        """Блок «Кратко» / вывод: цветная рамка слева, заголовок и пункты."""
+        body = "".join(f"<p>• {i}</p>" for i in items)
+        self.add(f'<table width="100%" cellspacing="0" cellpadding="10" bgcolor="{bg}" '
+                 f'style="margin-top:6px; margin-bottom:6px;"><tr>'
+                 f'<td width="6" bgcolor="{color}"></td>'
+                 f'<td><p style="font-size:13px; font-weight:800; color:#12293c;">{esc(title)}</p>{body}</td></tr></table>')
+
+    def kpis(self, tiles, per_row=3):
+        """Плитки показателей: [(подпись, значение, пояснение, цвет)]."""
+        html = '<table width="100%" cellspacing="6" cellpadding="9">'
+        for i in range(0, len(tiles), per_row):
+            html += "<tr>"
+            for label, value, sub, color in tiles[i:i + per_row]:
+                html += (f'<td width="{100 // per_row}%" bgcolor="#f2f7fb">'
+                         f'<p class="muted" style="font-size:10px;">{esc(label)}</p>'
+                         f'<p style="font-size:17px; font-weight:800; color:{color or "#12293c"};">{value}</p>'
+                         f'<p class="muted" style="font-size:9px;">{sub}</p></td>')
+            html += "</tr>"
+        self.add(html + "</table>")
+
+    def table(self, headers, rows, widths=None, align=None):
+        """Таблица с шапкой и полосатыми строками. align: строка из 'l'/'r'/'c' на каждый столбец."""
+        align = align or "l" * len(headers)
+        al = {"l": "left", "r": "right", "c": "center"}
+        html = '<table width="100%" cellspacing="0" cellpadding="5" style="margin-bottom:6px;"><tr>'
+        for i, h in enumerate(headers):
+            w = f' width="{widths[i]}%"' if widths else ""
+            html += f'<th{w} align="{al[align[i]]}">{h}</th>'
+        html += "</tr>"
+        for n, row in enumerate(rows):
+            bg = ' bgcolor="#f7fafc"' if n % 2 else ""
+            html += f"<tr{bg}>" + "".join(f'<td align="{al[align[i]]}" valign="top">{c}</td>'
+                                          for i, c in enumerate(row)) + "</tr>"
+        if not rows:
+            html += f'<tr><td colspan="{len(headers)}" class="muted">Нет данных</td></tr>'
+        self.add(html + "</table>")
+
+    def kv(self, pairs):
+        """Таблица «параметр — значение»."""
+        self.table(["Параметр", "Значение"], [[esc(k), v] for k, v in pairs], widths=[40, 60])
+
+
+def badge(label, color):
+    return f'<span style="color:{color}; font-weight:700;">● {esc(label)}</span>'
+
+
+def state_badge(state):
+    label, color = DEVICE_STATES[state]
+    return badge(label, color)
+
+
+def battery_html(level):
+    if level is None:
+        return '<span class="muted">—</span>'
+    color = "#e5484d" if level < 10 else ("#e08a00" if level < BATTERY_LOW else "#00a05e")
+    return f'<span style="color:{color}; font-weight:700;">{level}%</span>'
+
+
+def warranty_html(row):
+    status, days = row["warranty"]
+    until = fmt_date(row["passport"]["warranty_until"])
+    if status == "expired":
+        return f'<span style="color:#8aa0b2;">истекла {until}</span>'
+    if status == "ending":
+        return f'<span style="color:#e08a00; font-weight:700;">до {until} (осталось {days_text(days)})</span>'
+    months = days // 30
+    return f'<span style="color:#00a05e;">до {until}</span> <span class="muted">(≈ {months} мес.)</span>'
+
+
+def maintenance_html(m):
+    if not m:
+        return '<span class="muted">не требуется</span>'
+    if m["status"] == "overdue":
+        return f'<span style="color:#e5484d; font-weight:700;">просрочено на {days_text(-m["days"])}</span>'
+    if m["status"] == "soon":
+        return f'<span style="color:#e08a00; font-weight:700;">через {days_text(m["days"])}</span>'
+    return f'<span style="color:#00a05e;">в норме, следующее {fmt_date(m["next"])}</span>'
+
+
+def event_line(e):
+    return f'{date.fromisoformat(e["day"]).strftime("%d.%m.%Y")} {e["sim_time"]}', esc(e["text"])
+
+
+def state_detail(row):
+    if row["incident"]:
+        return esc(row["incident"]["issue"])
+    plain = QTextDocumentFragment.fromHtml(row["settings"]).toPlainText() if row["settings"] else ""
+    return esc(re.sub(r"[^\w\s%°·.,:+−-]", "", plain).strip(" ·"))
+
+
+# ---------- общие блоки трёх отчётов ----------
+
+def _devices_overview(h, r, ch):
+    c = r["counts"]
+    items = [(DEVICE_STATES[k][0], c[k], DEVICE_STATES[k][1], f"{c[k]} ({c[k] / max(1, c['total']) * 100:.0f}%)")
+             for k in ("ok", "off", "offline", "broken")]
+    h.add(ch.donut(items, center=str(c["total"]), sub="устройств"))
+
+
+def _attention_table(h, r, levels=("high", "medium", "low")):
+    rows = [[badge(*SEVERITY[sev]), f"<b>{esc(row['name'])}</b><br><span class='muted'>{esc(row['room'])}</span>",
+             esc(problem), esc(action)]
+            for sev, row, problem, action in r["attention"] if sev in levels]
+    if rows:
+        h.table(["Важность", "Устройство", "Проблема", "Что сделать"], rows, widths=[12, 22, 30, 36])
+    else:
+        h.box("Проблем нет", ["Все устройства исправны, батарейки заряжены, обслуживание выполнено вовремя."])
+
+
+def _devices_by_room(h, r):
+    by_floor = {}
+    for room in r["rooms"]:
+        by_floor.setdefault(room["floor"], []).append(room)
+    for floor_code, floor_name, _ in FLOORS:
+        for room in by_floor.get(floor_code, []):
+            rows = [row for row in r["rows"] if row["device"]["room_id"] == room["id"]]
+            if not rows:
+                continue
+            on = sum(1 for row in rows if row["state"] == "ok")
+            h.sub(f"{room['name']} · {floor_name} — {len(rows)} {plural(len(rows), 'устройство', 'устройства', 'устройств')}, "
+                  f"работают {on}")
+            table_rows = []
+            for row in rows:
+                last = row["last_event"]
+                last_text = (f"{date.fromisoformat(last['day']).strftime('%d.%m')} {last['sim_time']} — "
+                             f"{esc(last['text'])}") if last else "—"
+                table_rows.append([
+                    f"<b>{esc(row['name'])}</b><br><span class='muted'>{esc(row['model'])}</span>",
+                    f"{state_badge(row['state'])}<br><span class='muted'>{state_detail(row)}</span>",
+                    format_power(row["power_now"]) if row["power_now"] >= 1 else "—",
+                    f"{row['hours']:.0f} ч<br><span class='muted'>{row['switches']} вкл.</span>",
+                    battery_html(row["battery"]),
+                    f"<span class='small'>{last_text}</span>",
+                ])
+            h.table(["Устройство", "Состояние", "Мощность сейчас", "Работа за период", "Батарея", "Последнее событие"],
+                    table_rows, widths=[22, 24, 11, 11, 8, 24], align="llrrcl")
+
+
+def _batteries(h, r, ch):
+    rows = sorted((row for row in r["rows"] if row["battery"] is not None), key=lambda row: row["battery"])
+    if not rows:
+        h.p("Устройств с батарейным питанием нет.", muted=True)
+        return
+    items = [(f"{row['name']} ({row['room']})", row["battery"],
+              "#e5484d" if row["battery"] < 10 else ("#e08a00" if row["battery"] < BATTERY_LOW else "#00b96b"),
+              f"{row['battery']}% · ≈ {days_text(row['battery_days'])}") for row in rows]
+    h.add(ch.hbars(items, max_value=100))
+    h.note(f"Батарейки разряжаются постепенно со дня установки или последней замены. Ниже {BATTERY_LOW}% — пора менять, "
+           f"ниже 10% — датчик может отключиться в любой момент. «≈ N дней» — сколько осталось до полного разряда.")
+
+
+def _incidents_table(h, r):
+    rows = []
+    for row, inc in r["period_incidents"]:
+        duration = ((inc["end"] or r["today"]) - inc["start"]).days
+        status = (badge("устранено", "#00a05e") + f"<br><span class='muted'>{fmt_date(inc['end'])}: {esc(inc['fix'] or '')}</span>"
+                  if inc["end"] else badge("не устранено", "#e5484d"))
+        rows.append([fmt_date(inc["start"]), f"<b>{esc(row['name'])}</b><br><span class='muted'>{esc(row['room'])}</span>",
+                     esc(inc["issue"]), days_text(max(1, duration)), status])
+    h.table(["Дата", "Устройство", "Что случилось", "Длительность", "Итог"], rows, widths=[12, 20, 32, 12, 24])
+
+
+def _energy_kpis(h, r):
+    e = r["energy"]
+    h.kpis([
+        ("Выработали панели", fmt_kwh(e["gen"]), f"в среднем {fmt_kwh(e['gen'] / max(1, e['days']))} в день", "#c98a00"),
+        ("Потребил дом", fmt_kwh(e["cons"]), f"в среднем {fmt_kwh(e['cons'] / max(1, e['days']))} в день", None),
+        ("Взято из сети", fmt_kwh(e["imp"]), f"{e['imp'] / e['cons'] * 100:.0f}% потребления" if e["cons"] else "", "#e5484d"),
+        ("К оплате за сеть", format_money(e["pay"]), f"по тарифу {r['tariff']:g} ₸/кВт·ч", "#e5484d"),
+        ("Сэкономлено солнцем", format_money(e["saved"]), f"без панелей счёт был бы {format_money(e['nosolar'])}", "#00a05e"),
+        ("Самообеспеченность", fmt_pct(e["self_pct"]), "доля потребления без покупки из сети", "#00a05e"),
+    ])
+
+
+def _consumers(h, r, ch, top=10):
+    e = r["energy"]
+    rows = sorted((row for row in r["rows"] if row["energy"] > 0), key=lambda row: -row["energy"])
+    cons = e["cons"] or 1
+    items = [(f"{row['name']} ({row['room']})", row["energy"], "#3f8fd2",
+              f"{fmt_kwh(row['energy'])} · {row['energy'] / cons * 100:.0f}%") for row in rows[:top]]
+    h.add(ch.hbars(items))
+    return rows
+
+
+def _rooms_chart(h, r, ch):
+    e = r["energy"]
+    rooms = sorted(e["by_room"].items(), key=lambda kv: -kv[1])
+    cons = e["cons"] or 1
+    items = [(name, wh, "#00b96b", f"{fmt_kwh(wh)} · {format_money(wh / 1000 * r['tariff'])}")
+             for name, wh in rooms if wh > 0]
+    h.add(ch.hbars(items))
+    h.note(f"Ещё {fmt_kwh(e['other'])} ({e['other'] / cons * 100:.0f}%) — фоновое потребление дома, которое не относится "
+           f"к умным устройствам: обычные розетки, освещение, роутер провайдера.")
+
+
+def _recommendations(h, r, sections=None):
+    recs = [text for sec, text in r["recommendations"] if sections is None or sec in sections or sec == "home"]
+    if not recs:
+        recs = ["Замечаний нет."]
+    h.add("<ol>" + "".join(f"<li>{esc(t)}</li>" for t in recs) + "</ol>")
+
+
+def _methodology(h):
+    h.note("Как считались цифры: выработка, потребление, покупка из сети и отдача в сеть — по суточной истории "
+           "энергосистемы (сегодняшний день — по данным симуляции). Расход отдельных устройств оценивается по мощности "
+           "модели и типичному времени работы с учётом сезона и масштабируется так, чтобы сумма совпала с потреблением "
+           "дома. Деньги — по тарифу, заданному в программе. Отданная в сеть энергия не оплачивается.")
+
+
+# ---------- отчёт 1: состояние устройств ----------
+
+def report_html_devices(r, ch):
+    h = Html()
+    c = r["counts"]
+    h.title(REPORT_TITLES["devices"], r)
+    problems = [a for a in r["attention"] if a[0] in ("high", "medium")]
+    floors = {room["floor"] for room in r["rooms"]}
+    most_used = max(r["rows"], key=lambda row: -1 if row["device"]["type_code"] in ALWAYS_RUNNING_TYPES
+                    else row["hours"], default=None)
+    summary = [
+        f"В доме <b>{c['total']}</b> {plural(c['total'], 'устройство', 'устройства', 'устройств')} в "
+        f"{len(r['rooms'])} {plural(len(r['rooms']), 'комнате', 'комнатах', 'комнатах')} ({len(floors)} "
+        f"{plural(len(floors), 'этаж/зона', 'этажа/зоны', 'этажей/зон')}).",
+        f"Сейчас работают <b>{c['ok']}</b>, выключены {c['off']}, без связи <b>{c['offline']}</b>, неисправны "
+        f"<b>{c['broken']}</b>.",
+        (f"Требуют внимания: <b>{len(problems)}</b> — " + "; ".join(f"{esc(a[1]['name'])} ({esc(a[2].lower())})"
+                                                                  for a in problems[:3]) + ".")
+        if problems else "Срочных проблем нет.",
+        f"Батарейки: {c['low_battery']} {plural(c['low_battery'], 'устройство', 'устройства', 'устройств')} с зарядом "
+        f"ниже {BATTERY_LOW}%." if c["low_battery"] else "Все батарейки заряжены.",
+    ]
+    if most_used and most_used["hours"] > 0:
+        summary.append(f"Чаще всего использовали: <b>{esc(most_used['name'])}</b> ({esc(most_used['room'])}) — "
+                       f"≈ {most_used['hours']:.0f} ч работы за период.")
+    color, bg = ("#e5484d", "#fdf0f0") if c["broken"] or c["offline"] else ("#00a05e", "#eefaf4")
+    h.box("Кратко", summary, color, bg)
+
+    h.section("Общее состояние")
+    _devices_overview(h, r, ch)
+    h.kpis([
+        ("Всего устройств", str(c["total"]), f"в {len(r['rooms'])} комнатах", None),
+        ("Работают", str(c["ok"]), "включены и на связи", "#00a05e"),
+        ("Выключены", str(c["off"]), "исправны, но выключены", "#6b8396"),
+        ("Нет связи", str(c["offline"]), "не отвечают шлюзу / Wi-Fi", "#e08a00"),
+        ("Неисправны", str(c["broken"]), "нужен ремонт", "#e5484d"),
+        ("Слабые батарейки", str(c["low_battery"]), f"заряд ниже {BATTERY_LOW}%", "#e08a00"),
+    ])
+
+    h.section("Что требует внимания")
+    h.p("Список отсортирован по важности: сначала то, что нужно сделать срочно.", muted=True)
+    _attention_table(h, r)
+
+    h.section("Устройства по этажам и комнатам", new_page=True)
+    h.p("Для каждого устройства: где стоит, модель, состояние сейчас, мощность, сколько часов оно работало и сколько раз "
+        "его включали за период, заряд батарейки и последнее событие из журнала.", muted=True)
+    _devices_by_room(h, r)
+
+    h.section("Батарейки датчиков и замков")
+    _batteries(h, r, ch)
+
+    h.section("Активность за период")
+    rows = sorted((row for row in r["rows"] if row["hours"] > 0 and row["device"]["type_code"] not in ALWAYS_RUNNING_TYPES),
+                  key=lambda row: -row["hours"])[:10]
+    h.sub("Самые используемые устройства (часов работы за период)")
+    h.add(ch.hbars([(f"{row['name']} ({row['room']})", row["hours"], "#7b61ff",
+                     f"{row['hours']:.0f} ч · {row['switches']} вкл.") for row in rows]))
+    h.sub("Неисправности и потеря связи за период")
+    _incidents_table(h, r)
+
+    h.section("Рекомендации")
+    _recommendations(h, r, {"devices", "care"})
+    h.section("Паспорт устройств", new_page=True)
+    _passport_table(h, r)
+    return h.text()
+
+
+def _passport_table(h, r):
+    rows = [[f"<b>{esc(row['name'])}</b><br><span class='muted'>{esc(row['room'])} · {esc(row['type'])}</span>",
+             esc(row["model"]), row["passport"]["serial"], row["passport"]["firmware"],
+             fmt_date(row["passport"]["added"]), format_power(row["power_rated"])]
+            for row in r["rows"]]
+    h.table(["Устройство", "Модель", "Серийный номер", "Прошивка", "Установлено", "Мощность"], rows,
+            widths=[24, 30, 16, 9, 11, 10], align="lllcrr")
+
+
+# ---------- отчёт 2: электроэнергия ----------
+
+def report_html_energy(r, ch):
+    h = Html()
+    e, prev = r["energy"], r["energy"]["prev"]
+    h.title(REPORT_TITLES["energy"], r)
+    rows = sorted((row for row in r["rows"] if row["energy"] > 0), key=lambda row: -row["energy"])
+    top = rows[0] if rows else None
+    summary = [
+        f"Панели выработали <b>{fmt_kwh(e['gen'])}</b>, дом потребил <b>{fmt_kwh(e['cons'])}</b> — "
+        f"{change_text(e['cons'], prev['cons'] if prev['ok'] else None, fmt_kwh)}.",
+        f"Из сети куплено <b>{fmt_kwh(e['imp'])}</b> на <b>{format_money(e['pay'])}</b>; без солнечных панелей счёт был бы "
+        f"{format_money(e['nosolar'])} — сэкономлено <b>{format_money(e['saved'])}</b>.",
+        f"Самообеспеченность <b>{fmt_pct(e['self_pct'])}</b>: столько энергии дом получил от солнца и аккумулятора.",
+        f"Дом брал энергию из сети в {days_text(e['grid_days'])} из {e['days']}; аккумулятор заряжался полностью в "
+        f"{days_text(e['full_days'])}.",
+    ]
+    if top:
+        summary.append(f"Больше всего потребляет: <b>{esc(top['name'])}</b> ({esc(top['room'])}) — {fmt_kwh(top['energy'])}, "
+                       f"{top['energy'] / max(1, e['cons']) * 100:.0f}% всего потребления.")
+    h.box("Кратко", summary)
+
+    h.section("Главные показатели")
+    _energy_kpis(h, r)
+
+    h.section("Баланс энергии и сравнение с прошлым периодом")
+    if prev["ok"]:
+        h.p(f"Прошлый период для сравнения: {fmt_date(prev['start'])} — {fmt_date(prev['end'])} (столько же дней).",
+            muted=True)
+    else:
+        h.p(f"Прошлый период ({fmt_date(prev['start'])} — {fmt_date(prev['end'])}) захватывает время до запуска системы "
+            f"({fmt_date(HOME_SINCE)}), поэтому сравнение не проводится — выберите период покороче.", muted=True)
+
+    def delta(now, before, good_up=True, fmt=fmt_kwh):
+        if not before or not prev["ok"]:
+            return "—"
+        pct = (now - before) / before * 100
+        good = (pct >= 0) == good_up
+        color = "#00a05e" if good else "#e5484d"
+        return f'<span style="color:{color}; font-weight:700;">{"+" if pct >= 0 else "−"}{abs(pct):.0f}%</span>'
+
+    p_self = (prev["cons"] - prev["imp"]) / prev["cons"] * 100 if prev["cons"] else 0
+    h.table(["Показатель", "Этот период", "Прошлый период", "Изменение"], [
+        ["Выработка панелей", fmt_kwh(e["gen"]), fmt_kwh(prev["gen"]), delta(e["gen"], prev["gen"])],
+        ["Потребление дома", fmt_kwh(e["cons"]), fmt_kwh(prev["cons"]), delta(e["cons"], prev["cons"], False)],
+        ["Куплено из сети", fmt_kwh(e["imp"]), fmt_kwh(prev["imp"]), delta(e["imp"], prev["imp"], False)],
+        ["Отдано в сеть (бесплатно)", fmt_kwh(e["exp"]), fmt_kwh(prev["exp"]), delta(e["exp"], prev["exp"], False)],
+        ["Самообеспеченность", fmt_pct(e["self_pct"]), fmt_pct(p_self) if prev["cons"] else "—",
+         f"{e['self_pct'] - p_self:+.0f} п.п." if prev["cons"] else "—"],
+        ["К оплате за сеть", format_money(e["pay"]), format_money(prev["imp"] / 1000 * r["tariff"]),
+         delta(e["pay"], prev["imp"] / 1000 * r["tariff"], False)],
+        ["Сэкономлено солнцем", format_money(e["saved"]),
+         format_money(max(0, prev["cons"] - prev["imp"]) / 1000 * r["tariff"]),
+         delta(e["saved"], max(0, prev["cons"] - prev["imp"]) / 1000 * r["tariff"])],
+    ], widths=[34, 22, 22, 22], align="lrrr")
+    h.note("Зелёным отмечены изменения к лучшему, красным — к худшему.")
+
+    kind = "по дням" if r["n_days"] <= 62 else "по месяцам"
+    h.section(f"Потребление и выработка {kind}", new_page=True)
+    h.add(ch.energy(e["buckets"]))
+    h.note("Столбик — потребление дома: зелёная часть получена от солнца и аккумулятора, красная куплена из сети. "
+           "Жёлтая линия — выработка солнечных панелей.")
+    h.table([("День" if r["n_days"] <= 62 else "Месяц"), "Выработка", "Потребление", "Из сети", "В сеть", "К оплате"],
+            [[b["title"], fmt_kwh(b["gen"]), fmt_kwh(b["cons"]),
+              f'<span style="color:#c0392b;">{fmt_kwh(b["imp"])}</span>' if b["imp"] > 1 else fmt_kwh(b["imp"]),
+              fmt_kwh(b["exp"]), format_money(b["cost"])] for b in e["buckets"]]
+            + [["<b>Итого</b>", f"<b>{fmt_kwh(e['gen'])}</b>", f"<b>{fmt_kwh(e['cons'])}</b>", f"<b>{fmt_kwh(e['imp'])}</b>",
+                f"<b>{fmt_kwh(e['exp'])}</b>", f"<b>{format_money(e['pay'])}</b>"]],
+            widths=[20, 16, 17, 15, 15, 17], align="lrrrrr")
+    if e["best_day"]:
+        h.p(f"Самый солнечный день — <b>{fmt_date(e['best_day'])}</b> ({fmt_kwh(r['ctx']['days'][e['best_day']][0])}), "
+            f"самый пасмурный — <b>{fmt_date(e['worst_day'])}</b> ({fmt_kwh(r['ctx']['days'][e['worst_day']][0])}), "
+            f"больше всего потребили <b>{fmt_date(e['peak_day'])}</b> ({fmt_kwh(r['ctx']['days'][e['peak_day']][1])}).")
+
+    h.section("Кто потребляет энергию", new_page=True)
+    h.sub("10 самых «прожорливых» устройств")
+    rows = _consumers(h, r, ch)
+    h.sub("По комнатам")
+    _rooms_chart(h, r, ch)
+    h.sub("По категориям")
+    groups = sorted(e["by_group"].items(), key=lambda kv: -kv[1])
+    palette = ["#00b96b", "#3f8fd2", "#f5b301", "#e5484d", "#7b61ff", "#ff8a3d", "#14b8a6", "#8aa0b2", "#c06bd6"]
+    items = [(name, wh, palette[i % len(palette)], f"{fmt_kwh(wh)} · {wh / max(1, e['cons']) * 100:.0f}%")
+             for i, (name, wh) in enumerate(groups[:8]) if wh > 0]
+    h.add(ch.donut(items, h=max(170, 24 * len(items) + 16), center=f"{e['cons'] / 1000:.0f}", sub="кВт·ч всего"))
+    h.sub("Все устройства")
+    h.table(["Устройство", "Комната", "Энергия", "Доля", "Стоимость", "Часов работы"],
+            [[esc(row["name"]), esc(row["room"]), fmt_kwh(row["energy"]), f"{row['energy'] / max(1, e['cons']) * 100:.1f}%",
+              format_money(row["cost"]), f"{row['hours']:.0f}"] for row in rows],
+            widths=[26, 18, 15, 10, 16, 15], align="llrrrr")
+
+    h.section("Аккумулятор и внешняя сеть")
+    h.kpis([
+        ("Дней с покупкой из сети", f"{e['grid_days']} из {e['days']}", "аккумулятор разряжался ночью", "#e5484d"),
+        ("Дней с полной зарядкой АКБ", f"{e['full_days']} из {e['days']}", "излишки уходили в сеть", "#00a05e"),
+        ("Срабатываний эко-режима", str(e["eco_count"]), "отключение мощных приборов при заряде < 20%", "#e08a00"),
+    ])
+    h.p(f"Аккумулятор ёмкостью {BATTERY_CAPACITY_WH / 1000:.0f} кВт·ч переносит дневную энергию солнца на вечер и ночь. "
+        f"Когда заряд падает до резерва {BATTERY_RESERVE * 100:.0f}%, дом переходит на внешнюю сеть — это и есть "
+        f"«покупка из сети». Сейчас заряд {r['ctx']['battery_level'] * 100:.0f}%.")
+
+    h.section("Деньги")
+    h.table(["Статья", "Сумма"], [
+        ["Без солнечных панелей заплатили бы", format_money(e["nosolar"])],
+        ["Фактически к оплате за сеть", f'<span style="color:#e5484d; font-weight:700;">{format_money(e["pay"])}</span>'],
+        ["Экономия за период", f'<span style="color:#00a05e; font-weight:700;">{format_money(e["saved"])}</span>'],
+        ["Экономия в пересчёте на год", format_money(e["annual_saving"])],
+        ["Стоимость панелей и аккумулятора", format_money(SOLAR_SYSTEM_COST_KZT)],
+        ["Окупаемость при текущем тарифе", f"≈ {e['payback_years']:.0f} лет" if e["payback_years"] else "—"],
+    ], widths=[60, 40], align="lr")
+    h.note(f"Тариф {r['tariff']:g} ₸ за кВт·ч задаётся на вкладке «Энергия». При росте тарифа экономия растёт, "
+           f"а окупаемость сокращается.")
+
+    h.section("Экология")
+    h.kpis([
+        ("CO₂ не выброшено", f"{e['co2']:,.0f} кг".replace(",", " "), f"{CO2_KG_PER_KWH} кг CO₂ на кВт·ч сети РК", "#00a05e"),
+        ("Как деревьев за год", f"{e['trees']:.0f}", f"одно дерево поглощает ≈ {CO2_PER_TREE_KG} кг CO₂ в год", "#00a05e"),
+        ("Отдано в сеть", fmt_kwh(e["exp"]), f"{e['export_pct']:.0f}% выработки", None),
+    ])
+
+    h.section("Рекомендации по экономии")
+    _recommendations(h, r, {"energy"})
+    _methodology(h)
+    return h.text()
+
+
+# ---------- отчёт 3: состояние умного дома ----------
+
+def report_html_home(r, ch):
+    h = Html()
+    e, c, s, care = r["energy"], r["counts"], r["security"], r["care"]
+    score = r["score"]
+    label, color = score_label(score["total"])
+    h.title(REPORT_TITLES["home"], r, "Сводный отчёт: устройства, электроэнергия, безопасность, гарантия и обслуживание.")
+    gauge = ch.gauge(score["total"], color)
+    parts = "".join(
+        f'<tr><td>{esc(name)} <span class="muted">(вес {weight}%)</span></td>'
+        f'<td align="right"><b style="color:{score_label(v)[1]};">{v}</b> / 100</td></tr>'
+        for name, v, weight in score["parts"])
+    h.add(f'<table width="100%" cellspacing="0" cellpadding="6"><tr><td width="190" valign="middle">{gauge}</td>'
+          f'<td valign="middle"><p style="font-size:12px;" class="muted">Общая оценка состояния дома</p>'
+          f'<p style="font-size:26px; font-weight:800; color:{color};">{label}</p>'
+          f'<table width="100%" cellspacing="0" cellpadding="4">{parts}</table></td></tr></table>')
+    problems = [a for a in r["attention"] if a[0] in ("high", "medium")]
+    summary = [
+        f"Устройства: работают {c['ok']} из {c['total']}, без связи {c['offline']}, неисправны {c['broken']}"
+        + (f"; требуют внимания — {len(problems)}." if problems else "; проблем нет."),
+        f"Энергия: выработано {fmt_kwh(e['gen'])}, потреблено {fmt_kwh(e['cons'])}, самообеспеченность "
+        f"{fmt_pct(e['self_pct'])}, к оплате {format_money(e['pay'])}, сэкономлено {format_money(e['saved'])}.",
+        f"Безопасность: камеры заметили людей {s['people']} раз, датчики движения сработали {s['motion']} раз"
+        + (f", ночных обнаружений {len(s['night'])}" if s["night"] else ", ночью посторонних не было")
+        + (". Входной замок открыт!" if s["lock_open"] else "."),
+        f"Гарантия: на гарантии {care['active'] + care['ending']} устройств, скоро истекает {care['ending']}, "
+        f"истекла {care['expired']}. Обслуживание: просрочено {care['overdue']}, скоро {care['soon']}.",
+    ]
+    h.box("Кратко", summary, color, "#f4f8fb")
+
+    h.section("Общие сведения о доме")
+    floors = {room["floor"] for room in r["rooms"]}
+    h.kv([
+        ("Владелец", esc(r["owner"])),
+        ("Система работает с", f"{fmt_date(HOME_SINCE)} ({days_text((r['today'] - HOME_SINCE).days)})"),
+        ("Этажи и зоны", ", ".join(FLOOR_NAMES[f] for f, _, _ in FLOORS if f in floors)),
+        ("Комнат", str(len(r["rooms"]))),
+        ("Умных устройств", str(c["total"])),
+        ("Солнечные панели", f"{SOLAR_PEAK_W / 1000:.0f} кВт (пиковая мощность)"),
+        ("Аккумулятор", f"{BATTERY_CAPACITY_WH / 1000:.0f} кВт·ч, заряд сейчас {r['ctx']['battery_level'] * 100:.0f}%"),
+        ("Тариф на электроэнергию", f"{r['tariff']:g} ₸ за кВт·ч"),
+        ("Эко-режим", "включён" if r["ctx"].get("eco_mode") else "выключен"),
+        ("Стоимость умных устройств", format_money(care["value"])),
+    ])
+
+    h.section("Энергосистема", new_page=True)
+    _energy_kpis(h, r)
+    h.add(ch.energy(e["buckets"], h=230))
+    h.p(f"Потребление {change_text(e['cons'], e['prev']['cons'] if e['prev']['ok'] else None, fmt_kwh)}. Дом покупал энергию из сети в "
+        f"{days_text(e['grid_days'])} из {e['days']}, эко-режим срабатывал {e['eco_count']} раз. "
+        f"CO₂ не выброшено: {e['co2']:,.0f} кг (как {e['trees']:.0f} деревьев за год).".replace(",", " "))
+
+    h.section("Устройства")
+    _devices_overview(h, r, ch)
+    h.sub("Требуют внимания")
+    _attention_table(h, r, ("high", "medium"))
+    h.sub("Неисправности за период")
+    _incidents_table(h, r)
+
+    h.section("Потребление по комнатам и устройствам", new_page=True)
+    h.sub("По комнатам")
+    _rooms_chart(h, r, ch)
+    h.sub("Главные потребители")
+    _consumers(h, r, ch, top=8)
+
+    h.section("Безопасность")
+    h.kpis([
+        ("Люди на камерах", str(s["people"]), "срабатываний детекции", "#c0392b"),
+        ("Датчики движения", str(s["motion"]), "срабатываний", None),
+        ("Звонки в дверь", str(s["doorbell"]), "посетители", None),
+        ("Ночные обнаружения", str(len(s["night"])), "с 23:00 до 06:00", "#e5484d" if s["night"] else "#00a05e"),
+        ("Входной замок", "Открыт" if s["lock_open"] else "Закрыт", "сейчас", "#e5484d" if s["lock_open"] else "#00a05e"),
+        ("Охранных устройств", str(len(s["rows"])), "камеры, замки, датчики", None),
+    ])
+    h.table(["Устройство", "Комната", "Состояние", "Батарея", "Событий за период"],
+            [[esc(row["name"]), esc(row["room"]), state_badge(row["state"]), battery_html(row["battery"]),
+              str(row["events"])] for row in s["rows"]], widths=[28, 20, 22, 12, 18], align="lllcr")
+    if s["night"]:
+        h.sub("Ночные обнаружения")
+        h.table(["Когда", "Событие"], [list(event_line(ev)) for ev in s["night"]], widths=[22, 78])
+
+    h.section("Гарантия и обслуживание", new_page=True)
+    h.kpis([
+        ("Стоимость устройств", format_money(care["value"]), f"{c['total']} устройств", None),
+        ("На гарантии", str(care["active"] + care["ending"]), f"из них скоро истекает {care['ending']}", "#00a05e"),
+        ("Гарантия истекла", str(care["expired"]), "ремонт платный", "#8aa0b2"),
+        ("Обслуживание просрочено", str(care["overdue"]), "нужно выполнить", "#e5484d" if care["overdue"] else "#00a05e"),
+        ("Скоро обслуживание", str(care["soon"]), "в ближайшие 7 дней", "#e08a00"),
+        ("Выполнено за период", str(care["services_done"]), "работ по обслуживанию", None),
+    ])
+    h.sub("Гарантия")
+    h.table(["Устройство", "Куплено", "Цена", "Срок", "Гарантия"],
+            [[f"<b>{esc(row['name'])}</b><br><span class='muted'>{esc(row['room'])}</span>",
+              fmt_date(row["passport"]["purchase"]), format_money(row["passport"]["price"]),
+              f"{row['passport']['warranty_months']} мес.", warranty_html(row)] for row in r["warranty_rows"]],
+            widths=[28, 14, 15, 10, 33], align="lrrcl")
+    h.sub("Регламентное обслуживание")
+    h.table(["Устройство", "Что делать", "Как часто", "Последний раз", "Статус"],
+            [[f"<b>{esc(row['name'])}</b><br><span class='muted'>{esc(row['room'])}</span>", esc(row["maintenance"]["task"]),
+              f"раз в {row['maintenance']['interval']} дн.", fmt_date(row["maintenance"]["last"]),
+              maintenance_html(row["maintenance"])] for row in r["maintenance_rows"]],
+            widths=[22, 30, 13, 13, 22], align="llccl")
+
+    h.section("Важные события за период", new_page=True)
+    h.p("Неисправности, обслуживание, переходы на сеть, эко-режим, ночные обнаружения. Обычные события (включения, "
+        "датчики движения) смотрите во вкладке «События».", muted=True)
+    important = r["important"][-60:]
+    h.table(["Когда", "Событие"], [list(event_line(ev)) for ev in reversed(important)], widths=[20, 80])
+    if len(r["important"]) > 60:
+        h.note(f"Показаны последние 60 из {len(r['important'])} событий.")
+
+    h.section("Рекомендации")
+    _recommendations(h, r)
+    h.section("Приложение: паспорт устройств", new_page=True)
+    _passport_table(h, r)
+    _methodology(h)
+    return h.text()
+
+
+REPORT_BUILDERS = {"devices": report_html_devices, "energy": report_html_energy, "home": report_html_home}
+
+
+class ReportPdf:
+    """Печать HTML отчёта на страницы A4: шапка, содержимое, подвал с номером страницы. PDF или картинки страниц."""
+
+    PAGE_W, PAGE_H = 794, 1123          # A4 при 96 точках на дюйм
+    MARGIN_X, MARGIN_TOP, MARGIN_BOTTOM = 52, 74, 60
+
+    def __init__(self, title, report, html, images):
+        self.title = title
+        self.report = report
+        self.doc = QTextDocument()
+        self.doc.setDocumentMargin(0)
+        font = QFont("Segoe UI")
+        font.setPixelSize(12)
+        self.doc.setDefaultFont(font)
+        self.doc.setDefaultStyleSheet(REPORT_CSS)
+        for name, image in images.items():
+            self.doc.addResource(QTextDocument.ImageResource, QUrl(name), image)
+        self.doc.setHtml(f"<html><body>{html}</body></html>")
+        self.content = QSizeF(self.PAGE_W - 2 * self.MARGIN_X, self.PAGE_H - self.MARGIN_TOP - self.MARGIN_BOTTOM)
+        self.doc.setPageSize(self.content)
+
+    def page_count(self):
+        return self.doc.pageCount()
+
+    def paint_page(self, p, index):
+        count = self.page_count()
+        r = self.report
+        p.fillRect(QRectF(0, 0, self.PAGE_W, self.PAGE_H), Qt.white)
+        small = QFont("Segoe UI")
+        small.setPixelSize(10)
+        bold = QFont(small)
+        bold.setBold(True)
+        # шапка
+        p.setPen(QColor("#00a05e"))
+        p.setFont(bold)
+        p.drawText(QRectF(self.MARGIN_X, 30, 300, 16), Qt.AlignLeft | Qt.AlignVCenter, "УМНЫЙ ДОМ · солнечная энергосистема")
+        p.setPen(QColor("#6b8396"))
+        p.setFont(small)
+        p.drawText(QRectF(self.PAGE_W / 2, 30, self.PAGE_W / 2 - self.MARGIN_X, 16), Qt.AlignRight | Qt.AlignVCenter,
+                   f"{self.title} · {r['owner']}")
+        p.setPen(QPen(QColor("#dfe8ef"), 1))
+        p.drawLine(QPointF(self.MARGIN_X, 52), QPointF(self.PAGE_W - self.MARGIN_X, 52))
+        # содержимое страницы
+        p.save()
+        p.translate(self.MARGIN_X, self.MARGIN_TOP - index * self.content.height())
+        self.doc.drawContents(p, QRectF(0, index * self.content.height(), self.content.width(), self.content.height()))
+        p.restore()
+        # подвал
+        y = self.PAGE_H - 38
+        p.setPen(QPen(QColor("#dfe8ef"), 1))
+        p.drawLine(QPointF(self.MARGIN_X, y - 8), QPointF(self.PAGE_W - self.MARGIN_X, y - 8))
+        p.setPen(QColor("#6b8396"))
+        p.setFont(small)
+        p.drawText(QRectF(self.MARGIN_X, y, 520, 16), Qt.AlignLeft | Qt.AlignVCenter,
+                   f"Период {fmt_date(r['start'])} — {fmt_date(r['end'])} · сформирован "
+                   f"{r['ctx']['generated_at'].strftime('%d.%m.%Y %H:%M')}")
+        p.setFont(bold)
+        p.drawText(QRectF(self.PAGE_W - self.MARGIN_X - 150, y, 150, 16), Qt.AlignRight | Qt.AlignVCenter,
+                   f"Стр. {index + 1} из {count}")
+
+    def save_pdf(self, path):
+        printer = QPrinter(QPrinter.ScreenResolution)
+        printer.setOutputFormat(QPrinter.PdfFormat)
+        printer.setOutputFileName(path)
+        printer.setPageSize(QPageSize(QPageSize.A4))
+        printer.setPageMargins(0, 0, 0, 0, QPrinter.Millimeter)
+        printer.setFullPage(True)
+        printer.setDocName(self.title)
+        printer.setCreator("Умный дом")
+        p = QPainter(printer)
+        if not p.isActive():
+            raise OSError(f"Не удалось открыть файл для записи: {path}")
+        rect = printer.pageRect(QPrinter.DevicePixel)
+        p.scale(rect.width() / self.PAGE_W, rect.height() / self.PAGE_H)
+        for i in range(self.page_count()):
+            if i:
+                printer.newPage()
+            self.paint_page(p, i)
+        p.end()
+
+    def page_image(self, index, scale=1.5):
+        img = QImage(int(self.PAGE_W * scale), int(self.PAGE_H * scale), QImage.Format_ARGB32)
+        img.fill(Qt.white)
+        p = QPainter(img)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.TextAntialiasing)
+        p.scale(scale, scale)
+        self.paint_page(p, index)
+        p.end()
+        return img
+
+
+def build_report(kind, ctx):
+    """Собрать отчёт: (данные, ReportPdf)."""
+    report = collect_report(ctx)
+    charts = ReportCharts()
+    html = REPORT_BUILDERS[kind](report, charts)
+    return report, ReportPdf(REPORT_TITLES[kind], report, html, charts.images)
+
+
+REPORT_CONTENTS = {
+    "devices": ["Кратко: сколько устройств работает, выключено, без связи, неисправно",
+                "Что требует внимания и что именно сделать", "Все устройства по этажам и комнатам: состояние, мощность, "
+                "часы работы, последнее событие", "Батарейки датчиков и замков с прогнозом замены",
+                "Активность и неисправности за период", "Паспорт: модели, серийные номера, прошивки"],
+    "energy": ["Главные показатели и счёт в тенге", "Сравнение с прошлым периодом",
+               "График и таблица по дням или месяцам", "Кто потребляет: устройства, комнаты, категории",
+               "Аккумулятор и сеть, окупаемость, экология", "Рекомендации по экономии с расчётом в тенге"],
+    "home": ["Общая оценка дома от 0 до 100 по четырём направлениям", "Общие сведения, энергосистема, устройства",
+             "Безопасность: камеры, датчики, замок, ночные события", "Гарантия и регламентное обслуживание",
+             "Важные события за период", "Рекомендации и паспорт всех устройств"],
+}
+
+
+class ReportsCenterPage(QScrollArea):
+    """Вкладка «Отчёты»: выбор периода и три отчёта в PDF."""
+
+    def __init__(self, main, parent=None):
+        super().__init__(parent)
+        self.main = main
+        self.period = "month"
+        self.setWidgetResizable(True)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        host = QWidget()
+        layout = QVBoxLayout(host)
+        layout.setContentsMargins(0, 0, 8, 0)
+        layout.setSpacing(14)
+        self.setWidget(host)
+
+        intro = QLabel("Отчёты сохраняются в PDF (формат A4) и сразу открываются — их можно распечатать или отправить. "
+                       "Выберите период и нажмите «Сформировать PDF».")
+        intro.setObjectName("subtitle")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        caption = QLabel("Период:")
+        caption.setStyleSheet("font-weight: 700;")
+        row.addWidget(caption)
+        self.period_group = QButtonGroup(self)
+        for code, title, _ in REPORT_PERIOD_CHOICES:
+            btn = QPushButton(title)
+            btn.setObjectName("chip")
+            btn.setCheckable(True)
+            btn.setChecked(code == self.period)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.clicked.connect(lambda _, c=code: self.set_period(c))
+            self.period_group.addButton(btn)
+            row.addWidget(btn)
+        self.date_from, self.date_to = QDateEdit(), QDateEdit()
+        for edit in (self.date_from, self.date_to):
+            edit.setCalendarPopup(True)
+            edit.setDisplayFormat("dd.MM.yyyy")
+        today = self.main.simulator.sim_date()
+        self.date_from.setDate(QDate(today.year, today.month, 1))
+        self.date_to.setDate(QDate(today.year, today.month, today.day))
+        self.dash = QLabel("—")
+        row.addWidget(self.date_from)
+        row.addWidget(self.dash)
+        row.addWidget(self.date_to)
+        row.addStretch()
+        layout.addLayout(row)
+        self.period_label = QLabel()
+        self.period_label.setObjectName("subtitle")
+        layout.addWidget(self.period_label)
+        for edit in (self.date_from, self.date_to):
+            edit.dateChanged.connect(lambda *_: self.update_period_label())
+
+        cards = QHBoxLayout()
+        cards.setSpacing(14)
+        for code, title, icon, desc in REPORT_KINDS:
+            card = QFrame()
+            card.setObjectName("card")
+            c = QVBoxLayout(card)
+            c.setContentsMargins(20, 18, 20, 18)
+            c.setSpacing(8)
+            head = QLabel(f"{icon}  {title}")
+            head.setWordWrap(True)
+            head.setStyleSheet("font-size: 17px; font-weight: 800;")
+            c.addWidget(head)
+            text = QLabel(desc)
+            text.setWordWrap(True)
+            text.setObjectName("subtitle")
+            c.addWidget(text)
+            inside = QLabel("<b>Что внутри:</b><br>" + "<br>".join(f"• {esc(x)}" for x in REPORT_CONTENTS[code]))
+            inside.setTextFormat(Qt.RichText)
+            inside.setWordWrap(True)
+            inside.setStyleSheet("font-size: 13px; color: #3f5e75;")
+            c.addWidget(inside)
+            c.addStretch()
+            btn = QPushButton("📄  Сформировать PDF")
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.clicked.connect(lambda _, k=code: self.generate(k))
+            c.addWidget(btn)
+            cards.addWidget(card, 1)
+        layout.addLayout(cards)
+
+        bottom = QHBoxLayout()
+        self.last_label = QLabel()
+        self.last_label.setObjectName("subtitle")
+        self.last_label.setWordWrap(True)
+        bottom.addWidget(self.last_label, 1)
+        folder_btn = QPushButton("📂  Открыть папку с отчётами")
+        folder_btn.setObjectName("secondary")
+        folder_btn.setCursor(Qt.PointingHandCursor)
+        folder_btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(self.folder())))
+        bottom.addWidget(folder_btn)
+        layout.addLayout(bottom)
+        layout.addStretch()
+        self.set_period(self.period)
+
+    @staticmethod
+    def folder():
+        path = os.path.join(APP_DIR, "reports")
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    def period_range(self):
+        today = self.main.simulator.sim_date()
+        if self.period == "custom":
+            a, b = self.date_from.date().toPyDate(), self.date_to.date().toPyDate()
+            a, b = (a, b) if a <= b else (b, a)
+            return max(a, HOME_SINCE), min(b, today)
+        days = dict((c, n) for c, _, n in REPORT_PERIOD_CHOICES)[self.period]
+        return max(HOME_SINCE, today - timedelta(days=days - 1)), today
+
+    def set_period(self, code):
+        self.period = code
+        for btn, (c, _, _) in zip(self.period_group.buttons(), REPORT_PERIOD_CHOICES):
+            btn.setChecked(c == code)
+        for w in (self.date_from, self.dash, self.date_to):
+            w.setVisible(code == "custom")
+        self.update_period_label()
+
+    def update_period_label(self):
+        start, end = self.period_range()
+        n = (end - start).days + 1
+        note = f" · данные есть с {fmt_date(HOME_SINCE)}" if start == HOME_SINCE else ""
+        self.period_label.setText(f"Отчёт будет за {fmt_date(start)} — {fmt_date(end)} ({days_text(n)}){note}")
+
+    def generate(self, kind):
+        start, end = self.period_range()
+        if start > end:
+            self.main.toasts.show("⚠️", "Неверный период", "#e5484d")
+            return
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            _, pdf = build_report(kind, self.main.report_context(start, end))
+            name = f"{REPORT_TITLES[kind]} {start.strftime('%d.%m.%Y')}-{end.strftime('%d.%m.%Y')}.pdf"
+            path = os.path.join(self.folder(), name)
+            try:
+                pdf.save_pdf(path)
+            except OSError:   # файл открыт в программе просмотра - сохраняем под новым именем
+                path = path[:-4] + datetime.now().strftime(" %H-%M-%S") + ".pdf"
+                pdf.save_pdf(path)
+        finally:
+            QApplication.restoreOverrideCursor()
+        self.last_label.setText(f"Сохранено ({pdf.page_count()} стр.): {path}")
+        self.main.toasts.show("📄", f"{REPORT_TITLES[kind]} готов: {pdf.page_count()} стр.", ACCENT)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
+
+####################################
 ########### ГЛАВНОЕ ОКНО ###########
 ####################################
 
@@ -7052,7 +8811,8 @@ class MainWindow(QMainWindow):
     logged_out = pyqtSignal()
 
     COLUMNS = 3
-    PAGES = [("devices", "📱 Устройства"), ("plan", "🗺 План дома"), ("energy", "📊 Энергия"), ("events", "🔔 События")]
+    PAGES = [("devices", "📱 Устройства"), ("plan", "🗺 План дома"), ("energy", "📊 Энергия"), ("events", "🔔 События"),
+             ("reports", "📑 Отчёты")]
     STATEFUL_TYPES = {"kettle", "washer", "robot_vacuum", "lawn_mower", "irrigation"}  # их состояние периодически сохраняется в базу
 
     def __init__(self, db: Database, user: dict):
@@ -7066,6 +8826,8 @@ class MainWindow(QMainWindow):
         self.sensor_state = {}   # внутреннее состояние симуляции датчиков
         self.room_temps = {}     # id комнаты -> температура воздуха
         self.energy_history = []  # [(минута суток, выработка Вт, потребление Вт, заряд 0..1, из сети Вт)]
+        self.passports = {}           # id устройства -> паспорт (покупка, гарантия, ...)
+        self.synthetic_incidents = []  # смоделированные неисправности
         self.history_day = None
         self.control_dialog = None
         self.unread_events = 0
@@ -7209,6 +8971,8 @@ class MainWindow(QMainWindow):
         self.pages.addWidget(self.energy_page)
         self.events_page = EventsPage(self)
         self.pages.addWidget(self.events_page)
+        self.reports_page = ReportsCenterPage(self)
+        self.pages.addWidget(self.reports_page)
         left.addWidget(self.pages, 1)
         body.addLayout(left, 1)
 
@@ -7253,6 +9017,8 @@ class MainWindow(QMainWindow):
         self._update_events_badge()
         if self.PAGES[index][0] == "energy" and self.simulator.state:
             self.energy_page.update_state(self.simulator.state)
+        if self.PAGES[index][0] == "reports":
+            self.reports_page.update_period_label()
 
     def _update_events_badge(self):
         caption = dict(self.PAGES)["events"]
@@ -7321,8 +9087,92 @@ class MainWindow(QMainWindow):
             for key, value in old.get(d["id"], {}).items():
                 if key.startswith("_"):
                     d[key] = value
+        self.update_device_health()
         self.update_readings(self.simulator.state or None)
         self.refresh_grid()
+
+    # ---------- паспорт, неисправности, батарейки, обслуживание ----------
+
+    def update_device_health(self):
+        """Пересчитать паспорта и состояние устройств (неисправно / нет связи / заряд батарейки)."""
+        today = self.simulator.sim_date()
+        created = self.db.get_user_by_id(self.user["id"])["created_at"]
+        self.passports = device_passports(self.user["id"], self.devices, created)
+        self.synthetic_incidents = synthetic_incidents(self.devices, self.passports)
+        for d in self.devices:
+            incs = device_incidents(d, self.synthetic_incidents)
+            inc = active_incident(incs, today)
+            d["_state"] = inc["kind"] if inc else None
+            d["_issue"] = inc["issue"] if inc else ""
+            level = battery_level(d, self.passports[d["id"]], incs, today)
+            if level is not None and d["settings"].get("battery") != level:
+                d["settings"]["battery"] = level
+                self.db.save_settings(d["id"], d["settings"])
+
+    def device_info(self, device):
+        """Паспорт и состояние устройства для окна управления."""
+        today = self.simulator.sim_date()
+        p = self.passports.get(device["id"]) or device_passport(self.user["id"], device)
+        incs = device_incidents(device, self.synthetic_incidents)
+        return {"passport": p, "incidents": incs, "incident": active_incident(incs, today),
+                "state": device_state(device, incs, today), "battery": battery_level(device, p, incs, today),
+                "maintenance": maintenance_status(self.user["id"], device, p, today),
+                "warranty": warranty_status(p, today), "today": today}
+
+    def _health_changed(self, device):
+        self.db.save_settings(device["id"], device["settings"])
+        self.update_device_health()
+        card = self.cards.get(device["id"])
+        if card:
+            card.refresh(self.readings.get(device["id"]))
+
+    def mark_device_fault(self, device, issue):
+        today = self.simulator.sim_date().isoformat()
+        kind = "offline" if "связ" in issue.lower() else "broken"
+        device["settings"].setdefault("incidents", []).append({"start": today, "end": None, "kind": kind, "issue": issue})
+        if device["is_on"] and kind == "broken":
+            self.set_device_on(device, False, source="system")
+        self._health_changed(device)
+        self.log_event("device", "📵" if kind == "offline" else "⚠️", f"{device['name']}: отмечено неисправным — {issue}",
+                       toast=True, color="#e5484d")
+
+    def mark_device_fixed(self, device):
+        today = self.simulator.sim_date().isoformat()
+        s = device["settings"]
+        for inc in s.get("incidents", []):
+            if not inc.get("end"):
+                inc["end"] = today
+                inc["fix"] = "отмечено исправленным вручную"
+        for inc in self.synthetic_incidents:
+            if inc["device_id"] == device["id"] and inc["end"] is None:
+                s.setdefault("resolved", {})[inc["start"].isoformat()] = today
+        self._health_changed(device)
+        self.log_event("device", "✅", f"{device['name']}: исправлено (отмечено вручную)", toast=True)
+
+    def mark_service_done(self, device):
+        device["settings"]["service_done"] = self.simulator.sim_date().isoformat()
+        self._health_changed(device)
+        task = MAINTENANCE.get(device["type_code"], (0, "обслуживание"))[1]
+        self.log_event("device", "🧰", f"{device['name']}: выполнено обслуживание — {task}", toast=True)
+
+    def mark_battery_replaced(self, device):
+        device["settings"]["battery_since"] = self.simulator.sim_date().isoformat()
+        self._health_changed(device)
+        self.log_event("device", "🔋", f"{device['name']}: заменена батарейка", toast=True)
+
+    def report_context(self, start, end):
+        """Данные для отчётов за период (и такой же прошлый период для сравнения)."""
+        n = (end - start).days + 1
+        user = self.db.get_user_by_id(self.user["id"])
+        return {
+            "user_id": self.user["id"], "owner": self.user["username"], "user_created": user["created_at"],
+            "devices": self.devices, "rooms": [dict(r) for r in self.rooms],
+            "days": self.energy_days(start - timedelta(days=n), end),
+            "events": self.db.get_events_between(self.user["id"], start, end),
+            "start": start, "end": end, "today": self.simulator.sim_date(), "tariff": self.tariff,
+            "eco_mode": self.eco_mode, "battery_level": self.simulator.battery_wh / BATTERY_CAPACITY_WH,
+            "generated_at": datetime.now(),
+        }
 
     def find_device(self, device_id):
         return next((d for d in self.devices if d["id"] == device_id), None)
@@ -7723,6 +9573,14 @@ class MainWindow(QMainWindow):
         s = device["settings"]
         t = device["type_code"]
         requested = on
+        if on and source == "user" and device.get("_state") in ("broken", "offline"):
+            problem = "неисправно" if device["_state"] == "broken" else "нет связи"
+            self.toasts.show("⚠️", f"{device['name']}: {problem} — включить не получится. Отметьте «Исправлено» "
+                                   f"в окне устройства после ремонта.", "#e5484d")
+            card = self.cards.get(device["id"])
+            if card:
+                card.refresh(self.readings.get(device["id"]))
+            return
         if t == "irrigation" and on:
             if s.get("rain_sensor") and self.simulator.state.get("raining"):
                 self.log_event("device", "🌧", f"{device['name']}: идёт дождь — полив отменён", toast=True)

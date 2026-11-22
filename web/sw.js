@@ -1,6 +1,6 @@
 // Офлайн-работа: сначала сеть (чтобы обновления приходили сразу), при её отсутствии - кэш.
-const CACHE = "smarthome-v4";
-const SHELL = ["./", "index.html", "style.css", "data.js", "core.js", "visuals.js", "app.js", "manifest.webmanifest",
+const CACHE = "smarthome-v5";
+const SHELL = ["./", "index.html", "style.css", "data.js", "core.js", "visuals.js", "reports.js", "app.js", "manifest.webmanifest",
                "icons/icon-192.png", "icons/apple-touch-icon.png", "img/1floor.jpg", "img/2floor.jpg", "img/3Region.jpg"];
 
 self.addEventListener("install", e => {

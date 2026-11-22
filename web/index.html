@@ -66,7 +66,16 @@
       <button data-page="plan"><span>🗺</span>План</button>
       <button data-page="energy"><span>📊</span>Энергия</button>
       <button data-page="events"><span>🔔</span>События<i id="eventsBadge" class="badge hidden"></i></button>
+      <button data-page="reports"><span>📑</span>Отчёты</button>
     </nav>
+  </div>
+
+  <div id="reportView" class="report-view hidden">
+    <div class="report-bar">
+      <button id="reportClose" class="btn">✕ Закрыть</button>
+      <button id="reportPrint" class="btn primary">⬇ Сохранить в PDF</button>
+    </div>
+    <article id="reportDoc" class="report-doc"></article>
   </div>
 
   <div id="sheet" class="sheet hidden">
@@ -85,6 +94,7 @@
   <script src="data.js"></script>
   <script src="core.js"></script>
   <script src="visuals.js"></script>
+  <script src="reports.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
