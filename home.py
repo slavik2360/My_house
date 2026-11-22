@@ -778,7 +778,11 @@ EV_MIN_POWER = 6 * GRID_VOLTAGE  # зарядка авто не может ра�
 
 # ---------- история энергии для отчётов ----------
 
-ENERGY_HISTORY_START = date(2025, 1, 1)
+# С этого дня в доме «работает» система: прошлые дни заполняются смоделированной историей
+# (энергия и журнал событий), как будто приложением пользуются уже полгода
+HOME_SINCE = date(2026, 5, 18)
+ENERGY_HISTORY_START = HOME_SINCE
+EVENTS_LIMIT = 8000  # сколько последних событий хранится в базе и показывается в журнале
 
 
 def synthetic_energy_history(user_id, devices_count, until):
@@ -816,6 +820,221 @@ def synthetic_energy_history(user_id, devices_count, until):
         battery -= from_battery
         result[day] = (generated, consumed, need - from_battery, surplus - charge)
         day += timedelta(days=1)
+    return result
+
+
+def _clock(minute):
+    minute = int(max(0, min(1439, minute)))
+    return "%02d:%02d" % (minute // 60, minute % 60)
+
+
+def synthetic_event_history(user_id, devices, energy, days, tariff=DEFAULT_TARIFF_KZT):
+    """
+    Правдоподобный журнал событий за прошлые дни days - как будто домом пользуются с HOME_SINCE.
+    События согласованы с энергоисторией energy ({дата: (выработка, потребление, из сети, в сеть)}):
+    в солнечные дни АКБ заряжается полностью и авто заряжается от излишков, в пасмурные - дом берёт
+    энергию из сети и срабатывает эко-режим; летом полив и газонокосилка, зимой обогреватель.
+    Возвращает [(дата, "ЧЧ:ММ", категория, значок, текст)]; для каждого дня ряд детерминирован.
+    """
+    by_type = {}
+    for d in devices:
+        by_type.setdefault(d["type_code"], []).append(d)
+    # устройства появлялись в доме постепенно, за первые три недели (инвертор - с первого дня)
+    order_rng = random.Random(f"devices-added-{user_id}")
+    added = {d["id"]: HOME_SINCE + timedelta(days=0 if d["type_code"] == "inverter" else order_rng.randint(0, 20))
+             for d in devices}
+    washer_modes = [m for m, _ in TYPE_MODES["washer"]]
+    result = []
+    for day in days:
+        rng = random.Random(f"events-{user_id}-{day.isoformat()}")
+        events = []
+
+        def add(minute, category, icon, text):
+            events.append((int(max(0, min(1439, minute))), category, icon, text))
+
+        def present(type_code):
+            return [d for d in by_type.get(type_code, []) if added[d["id"]] <= day]
+
+        def toggle(d, minute, on=True):
+            add(minute, "device", "🟢" if on else "⚪", f"{'Включено' if on else 'Выключено'}: {d['name']} ({d['room_name']})")
+
+        doy = day.timetuple().tm_yday
+        summer = 0.5 + 0.5 * math.cos(2 * math.pi * (doy - 172) / 365)
+        weekend = day.weekday() >= 5
+        generated, consumed, imported, exported = energy.get(day, (0.0, 0.0, 0.0, 0.0))
+        sunny = generated / (SOLAR_PEAK_W * (1.6 + 4.2 * summer))   # ~0.95 ясно, ~0.3 пасмурно
+        rainy = sunny < 0.45
+        warm = 5 <= day.month <= 9
+        cold = summer < 0.35   # отопительный сезон: примерно с середины октября до середины марта
+        hot = summer > 0.8 and sunny > 0.65
+        sunrise = 470 - 140 * summer + rng.randint(-4, 4)   # ~05:30 летом, ~07:50 зимой
+        sunset = 1040 + 220 * summer + rng.randint(-4, 4)   # ~21:00 летом, ~17:20 зимой
+
+        for d in devices:
+            if added[d["id"]] == day:
+                add(rng.randint(600, 1260), "device", "➕", f"Добавлено устройство: {d['name']} ({d['room_name']})")
+
+        # ---------- энергосистема ----------
+        add(sunrise, "energy", "🌅", "Восход — солнечные панели начали выработку")
+        kwh = generated / 1000
+        add(sunset, "energy", "🌇", f"Закат — выработка за день {kwh:.1f} кВт·ч (≈ {format_money(kwh * tariff)})")
+        if exported > 300:
+            add(rng.randint(750, 930), "energy", "🔋", "Аккумулятор полностью заряжен")
+        if imported > 300:
+            # ночью АКБ разрядилась до резерва - до восхода дом питается от сети
+            low = rng.randint(30, 150) if imported > 2500 else rng.randint(180, 300)
+            add(low, "energy", "🪫", f"Заряд АКБ ниже 20% ({rng.randint(17, 19)}%)")
+            shed = ", ".join(dict.fromkeys(d["name"] for t in ECO_SHED_TYPES for d in present(t)))
+            if shed and imported > 4000:
+                add(low + 2, "energy", "🌿", f"Эко-режим: АКБ {rng.randint(18, 19)}% — отключены: {shed}")
+                add(sunrise + rng.randint(200, 320), "energy", "🌿",
+                    f"Эко-режим: АКБ {rng.randint(40, 46)}% — снова включены: {shed}")
+            add(low + rng.randint(25, 70), "energy", "🔌", "Дом перешёл на питание от внешней сети")
+            add(sunrise + rng.randint(90, 170), "energy", "🔋", "Питание от сети больше не требуется")
+        for d in present("ev_charger"):
+            if exported > 1500 and rng.random() < 0.6:
+                start = rng.randint(660, 780)
+                add(start, "energy", "☀️", f"{d['name']}: работает от излишков солнца "
+                                          f"({format_power(rng.uniform(1800, min(7000, 1800 + exported / 2)))})")
+                add(max(start + 60, rng.randint(900, int(sunset) - 40)), "energy", "⏸",
+                    f"{d['name']}: излишков нет — ждёт солнца")
+
+        # ---------- распорядок дня ----------
+        leave = rng.randint(475, 530) if not weekend and rng.random() < 0.8 else None
+        if leave:
+            add(leave, "device", "🎬", f"Сценарий «Ухожу из дома (выключить всё)»: изменено устройств — {rng.randint(3, 7)}")
+        if rng.random() < 0.6:
+            add(rng.randint(1350, 1435), "device", "🎬",
+                f"Сценарий «Выключить свет во всём доме»: изменено устройств — {rng.randint(2, 5)}")
+
+        for d in present("kettle"):
+            target = rng.choice([60, 80, 90, 100, 100])
+            morning = rng.randint(400, 450) if not weekend else rng.randint(500, 600)
+            if rng.random() < 0.03:
+                add(morning - 3, "device", "💧", f"{d['name']}: нет воды — нагрев отменён")
+            add(morning, "device", "☕", f"{d['name']}: вода нагрета до {target}°C")
+            if rng.random() < 0.55:
+                add(rng.randint(1110, 1290), "device", "☕", f"{d['name']}: вода нагрета до {rng.choice([80, 90, 100])}°C")
+
+        for d in present("tv"):
+            if rng.random() < 0.8:
+                on = rng.randint(1140, 1260)
+                toggle(d, on)
+                toggle(d, min(1435, on + rng.randint(60, 150)), False)
+            if weekend and rng.random() < 0.5:
+                on = rng.randint(660, 900)
+                toggle(d, on)
+                toggle(d, on + rng.randint(40, 120), False)
+        for d in present("bulb"):
+            if sunset < 1290 or rng.random() < 0.4:
+                toggle(d, max(sunset + rng.randint(-20, 20), 1080))
+        for d in present("bedside_lamp"):
+            if rng.random() < 0.7:
+                on = rng.randint(1350, 1410)
+                toggle(d, on)
+                if rng.random() < 0.6:
+                    add(min(1439, on + rng.choice([15, 30])), "device", "⏱", f"Таймер: выключено «{d['name']}»")
+        for d in present("light_strip"):
+            if (warm and weekend) or day.month == 12:
+                toggle(d, sunset + rng.randint(5, 30))
+                toggle(d, rng.randint(1380, 1435), False)
+
+        # ---------- климат ----------
+        for d in present("air_conditioner"):
+            if hot and rng.random() < 0.85:
+                on = rng.randint(780, 900)
+                toggle(d, on)
+                add(on + rng.randint(25, 50), "device", "❄️",
+                    f"{d['name']}: в комнате «{d['room_name']}» достигнуто {d['settings'].get('target_temp', 24)}°C")
+        for d in present("heater"):
+            if cold and rng.random() < 0.8:
+                for on in ([rng.randint(390, 450)] + ([rng.randint(1080, 1200)] if rng.random() < 0.5 else [])):
+                    toggle(d, on)
+                    add(on + rng.randint(20, 45), "device", "🔥",
+                        f"{d['name']}: в комнате «{d['room_name']}» достигнуто {d['settings'].get('target_temp', 22)}°C")
+
+        # ---------- бытовая техника ----------
+        for d in present("washer"):
+            if rng.random() < (0.7 if weekend else 0.4):
+                start = rng.randint(540, 1140)
+                toggle(d, start)
+                add(start + rng.randint(80, 140), "device", "🧺", f"{d['name']}: стирка завершена ({rng.choice(washer_modes)})")
+        for d in present("dishwasher"):
+            if rng.random() < 0.55:
+                toggle(d, rng.randint(1260, 1350))
+        for d in present("vacuum"):
+            if weekend and rng.random() < 0.5:
+                on = rng.randint(600, 720)
+                toggle(d, on)
+                toggle(d, on + rng.randint(15, 30), False)
+        for d in present("robot_vacuum"):
+            if (leave and rng.random() < 0.75) or (weekend and rng.random() < 0.3):
+                start = (leave or 600) + rng.randint(20, 90)
+                toggle(d, start)
+                if rng.random() < 0.06:
+                    add(start + rng.randint(25, 35), "device", "🪫", f"{d['name']}: низкий заряд, едет на базу")
+                    finish = start + 38
+                else:
+                    finish = start + rng.randint(40, 55)
+                    add(finish, "device", "🤖", f"{d['name']}: уборка завершена, возвращается на базу")
+                add(finish + rng.randint(3, 5), "device", "🏠", f"{d['name']}: на базе, заряжается")
+
+        # ---------- участок ----------
+        for d in present("lawn_mower"):
+            if warm and day.weekday() in (2, 5):
+                start = rng.randint(600, 660)
+                if rainy and rng.random() < 0.5:
+                    toggle(d, start)
+                    add(start + rng.randint(15, 30), "device", "🌧", f"{d['name']}: начался дождь — возвращается на базу")
+                elif not rainy:
+                    toggle(d, start)
+                    finish = start + rng.randint(60, 75)
+                    add(finish, "device", "🚜", f"{d['name']}: газон подстрижен, возвращается на базу")
+                    add(finish + rng.randint(3, 5), "device", "🏠", f"{d['name']}: на базе, заряжается")
+        for d in present("irrigation"):
+            if warm and (day.month in (6, 7, 8) or day.toordinal() % 2 == 0):
+                start = rng.randint(330, 360)
+                if rainy:
+                    add(start, "device", "🌧", f"{d['name']}: идёт дождь — полив отменён")
+                else:
+                    minutes = d["settings"].get("irr_minutes", 10)
+                    toggle(d, start)
+                    add(start + minutes, "device", "💦",
+                        f"{d['name']}: полив завершён, израсходовано {minutes * rng.uniform(11, 14):.0f} л воды")
+
+        # ---------- безопасность ----------
+        for d in present("motion_sensor"):
+            if weekend:
+                times = [rng.randint(480, 1410) for _ in range(rng.randint(3, 7))]
+            else:
+                times = ([rng.randint(390, 510) for _ in range(rng.randint(1, 2))]
+                         + [rng.randint(1080, 1410) for _ in range(rng.randint(2, 4))])
+            for minute in times:
+                add(minute, "security", "🏃", f"Движение: {d['room_name']} ({d['name']})")
+        for d in present("door_sensor"):
+            for _ in range(rng.randint(1, 3)):
+                opened = rng.randint(420, 1350)
+                add(opened, "security", "🚪", f"Открыто: {d['name']} ({d['room_name']})")
+                add(opened + rng.randint(1, 8), "security", "🚪", f"Закрыто: {d['name']} ({d['room_name']})")
+        for d in present("presence_sensor"):
+            arrived = rng.randint(1050, 1200) if not weekend else rng.randint(480, 600)
+            add(arrived, "security", "👥", f"Обнаружено присутствие: {d['room_name']}")
+            if not weekend:
+                add(rng.randint(470, 530), "security", "👥", f"Никого нет: {d['room_name']}")
+        for d in present("camera"):
+            if not d["settings"].get("motion_alerts", True):
+                continue
+            outdoor = d["room_name"] in ("Двор", "Терраса", "Гараж")
+            for _ in range(rng.randint(0, 2) if outdoor else rng.choice([0, 0, 0, 1])):
+                add(rng.randint(420, 1320), "security", "📹", f"{d['name']}: обнаружен человек ({d['room_name']})")
+            if outdoor and rng.random() < 0.015:
+                add(rng.randint(60, 240), "security", "📹", f"{d['name']}: обнаружен человек ({d['room_name']})")
+        for d in present("doorbell"):
+            if rng.random() < (0.45 if weekend else 0.3):
+                add(rng.randint(660, 1200), "security", "📹", f"{d['name']}: обнаружен человек ({d['room_name']})")
+
+        events.sort(key=lambda e: e[0])
+        result.extend((day, _clock(minute), category, icon, text) for minute, category, icon, text in events)
     return result
 
 
@@ -924,6 +1143,7 @@ class Database:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                 sim_time TEXT NOT NULL,
+                day TEXT,
                 category TEXT NOT NULL,
                 icon TEXT NOT NULL,
                 text TEXT NOT NULL,
@@ -952,6 +1172,7 @@ class Database:
         "total_import_wh": "REAL NOT NULL DEFAULT 0",
         "total_export_wh": "REAL NOT NULL DEFAULT 0",
         "seed_version": "INTEGER NOT NULL DEFAULT 0",
+        "events_until": "TEXT",  # по какой день журнал уже дописан смоделированной историей
     }
 
     def migrate(self):
@@ -966,6 +1187,14 @@ class Database:
             self.conn.execute("ALTER TABLE rooms ADD COLUMN floor TEXT NOT NULL DEFAULT 'floor1'")
             for room in self.conn.execute("SELECT id, name FROM rooms").fetchall():
                 self.conn.execute("UPDATE rooms SET floor = ? WHERE id = ?", (room_zone(room["name"])[0], room["id"]))
+        # у событий появилась дата: для старых записей берём дату, когда они были записаны
+        event_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(events)")}
+        if "day" not in event_columns:
+            self.conn.execute("ALTER TABLE events ADD COLUMN day TEXT")
+        self.conn.execute("UPDATE events SET day = substr(created_at, 1, 10) WHERE day IS NULL")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS events_by_day ON events (user_id, day, sim_time)")
+        # история энергии начинается с HOME_SINCE - более ранние дни (старые версии писали с 2025 года) убираем
+        self.conn.execute("DELETE FROM energy_days WHERE day < ?", (HOME_SINCE.isoformat(),))
         self.conn.commit()
 
     SEED_VERSION = 2  # 2: двор с газонокосилкой и поливом, устройства расставлены по плану
@@ -1057,23 +1286,53 @@ class Database:
 
     # ---------- журнал событий ----------
 
-    def add_event(self, user_id, sim_time, category, icon, text):
+    EVENTS_ORDER = "day DESC, sim_time DESC, id DESC"
+
+    def add_event(self, user_id, day, sim_time, category, icon, text):
         self.conn.execute(
-            "INSERT INTO events (user_id, sim_time, category, icon, text, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-            (user_id, sim_time, category, icon, text, datetime.now().isoformat(timespec="seconds")),
+            "INSERT INTO events (user_id, day, sim_time, category, icon, text, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (user_id, day.isoformat(), sim_time, category, icon, text, datetime.now().isoformat(timespec="seconds")),
         )
-        # храним только последние 500 событий
-        self.conn.execute(
-            "DELETE FROM events WHERE user_id = ? AND id NOT IN "
-            "(SELECT id FROM events WHERE user_id = ? ORDER BY id DESC LIMIT 500)", (user_id, user_id)
-        )
+        self._trim_events(user_id)
         self.conn.commit()
 
-    def get_events(self, user_id, limit=300):
+    def _trim_events(self, user_id):
+        """Храним только последние EVENTS_LIMIT событий."""
+        self.conn.execute(
+            "DELETE FROM events WHERE user_id = ? AND id NOT IN "
+            f"(SELECT id FROM events WHERE user_id = ? ORDER BY {self.EVENTS_ORDER} LIMIT ?)",
+            (user_id, user_id, EVENTS_LIMIT)
+        )
+
+    def get_events(self, user_id, limit=EVENTS_LIMIT):
         rows = self.conn.execute(
-            "SELECT * FROM events WHERE user_id = ? ORDER BY id DESC LIMIT ?", (user_id, limit)
+            f"SELECT * FROM events WHERE user_id = ? ORDER BY {self.EVENTS_ORDER} LIMIT ?", (user_id, limit)
         ).fetchall()
         return [dict(row) for row in reversed(rows)]
+
+    def backfill_event_history(self, user_id, devices, until, tariff):
+        """
+        Дописать журнал за прошлые дни, когда программой не пользовались (с HOME_SINCE или с последней
+        дописанной даты по until). Дни, в которых уже есть настоящие события, не трогаем.
+        """
+        row = self.conn.execute("SELECT events_until FROM users WHERE id = ?", (user_id,)).fetchone()
+        start = HOME_SINCE
+        if row["events_until"]:
+            start = max(start, date.fromisoformat(row["events_until"]) + timedelta(days=1))
+        if start > until:
+            return
+        busy = {r[0] for r in self.conn.execute("SELECT DISTINCT day FROM events WHERE user_id = ?", (user_id,))}
+        days = [start + timedelta(days=i) for i in range((until - start).days + 1)]
+        days = [d for d in days if d.isoformat() not in busy]
+        energy = self.get_energy_days(user_id, start, until)
+        rows = [(user_id, d.isoformat(), sim_time, category, icon, text, f"{d.isoformat()}T{sim_time}:00")
+                for d, sim_time, category, icon, text in synthetic_event_history(user_id, devices, energy, days, tariff)]
+        self.conn.executemany(
+            "INSERT INTO events (user_id, day, sim_time, category, icon, text, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)", rows
+        )
+        self.conn.execute("UPDATE users SET events_until = ? WHERE id = ?", (until.isoformat(), user_id))
+        self._trim_events(user_id)
+        self.conn.commit()
 
     def clear_events(self, user_id):
         self.conn.execute("DELETE FROM events WHERE user_id = ?", (user_id,))
@@ -1127,6 +1386,14 @@ class Database:
                 for d, values in synthetic_energy_history(user_id, devices_count, until).items()]
         self.conn.executemany("INSERT OR IGNORE INTO energy_days VALUES (?, ?, ?, ?, ?, ?, ?)", rows)
         self.conn.commit()
+
+    def energy_totals(self, user_id, until):
+        """Суммы за всю историю по until включительно: (выработка, из сети, в сеть), Вт·ч."""
+        row = self.conn.execute(
+            "SELECT COALESCE(SUM(generated_wh), 0), COALESCE(SUM(import_wh), 0), COALESCE(SUM(export_wh), 0) "
+            "FROM energy_days WHERE user_id = ? AND day <= ?", (user_id, until.isoformat())
+        ).fetchone()
+        return tuple(row)
 
     def get_energy_days(self, user_id, start, end):
         rows = self.conn.execute(
@@ -6118,7 +6385,11 @@ class EnergyLivePage(QScrollArea):
 MONTHS_SHORT = ["янв", "фев", "мар", "апр", "май", "июн", "июл", "авг", "сен", "окт", "ноя", "дек"]
 MONTHS_FULL = ["январь", "февраль", "март", "апрель", "май", "июнь", "июль", "август", "сентябрь", "октябрь",
                "ноябрь", "декабрь"]
-REPORT_PERIODS = [("today", "Сегодня"), ("week", "Неделя"), ("month", "Месяц"), ("year", "Год"), ("custom", "Свой период")]
+MONTHS_GENITIVE = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября",
+                   "ноября", "декабря"]
+WEEKDAYS_FULL = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"]
+REPORT_PERIODS = [("today", "Сегодня"), ("week", "Неделя"), ("month", "Месяц"), ("halfyear", "Полгода"), ("year", "Год"),
+                  ("custom", "Свой период")]
 
 
 def kwh_text(wh, digits=1):
@@ -6395,6 +6666,8 @@ class ReportsPage(QScrollArea):
             return today - timedelta(days=6), today
         if self.period == "month":
             return today - timedelta(days=29), today
+        if self.period == "halfyear":
+            return today - timedelta(days=181), today
         if self.period == "year":
             return today - timedelta(days=364), today
         a, b = self.date_from.date().toPyDate(), self.date_to.date().toPyDate()
@@ -6646,21 +6919,57 @@ class EventsPage(QWidget):
         item.setForeground(QColor(colors.get(event["category"], "#14364f")))
         return item
 
+    def _day_caption(self, day_iso):
+        try:
+            day = date.fromisoformat(day_iso)
+        except (TypeError, ValueError):
+            return "Без даты"
+        today = self.main.simulator.sim_date()
+        text = f"{day.day} {MONTHS_GENITIVE[day.month - 1]}" + (f" {day.year}" if day.year != today.year else "")
+        if day == today:
+            return f"Сегодня, {text}"
+        if day == today - timedelta(days=1):
+            return f"Вчера, {text}"
+        return f"{WEEKDAYS_FULL[day.weekday()]}, {text}"
+
+    def _header(self, day_iso):
+        item = QListWidgetItem(self._day_caption(day_iso))
+        item.setFlags(Qt.NoItemFlags)
+        item.setData(Qt.UserRole, day_iso)
+        font = item.font()
+        font.setBold(True)
+        item.setFont(font)
+        item.setForeground(QColor("#5b7489"))
+        item.setBackground(QColor("#eef4f9"))
+        return item
+
     def add_event(self, event):
-        if self.filter in ("all", event["category"]):
-            self.list.insertItem(0, self._item(event))
-            while self.list.count() > 300:
-                self.list.takeItem(self.list.count() - 1)
+        if self.filter not in ("all", event["category"]):
+            return
+        top = self.list.item(0)
+        if top is None or top.data(Qt.UserRole) != event["day"]:
+            # новый день (или пустой журнал) - перерисовываем, чтобы обновились «Сегодня»/«Вчера»
+            self.reload()
+            return
+        self.list.insertItem(1, self._item(event))
+        while self.list.count() > EVENTS_LIMIT + 400:
+            self.list.takeItem(self.list.count() - 1)
 
     def reload(self):
+        self.list.setUpdatesEnabled(False)
         self.list.clear()
+        last_day = None
         for event in reversed(self.main.events):
             if self.filter in ("all", event["category"]):
+                if event.get("day") != last_day:
+                    last_day = event.get("day")
+                    self.list.addItem(self._header(last_day))
                 self.list.addItem(self._item(event))
         if self.list.count() == 0:
             item = QListWidgetItem("Событий пока нет")
             item.setForeground(QColor("#8aa0b2"))
             self.list.addItem(item)
+        self.list.setUpdatesEnabled(True)
 
 
 ####################################
@@ -6778,7 +7087,17 @@ class MainWindow(QMainWindow):
         self.toasts = ToastManager(self.centralWidget())
         self.reload_rooms()
         self.reload_devices()
-        self.db.backfill_energy_history(user["id"], len(self.devices), date.today() - timedelta(days=1))
+        yesterday = date.today() - timedelta(days=1)
+        self.db.backfill_energy_history(user["id"], len(self.devices), yesterday)
+        self.db.backfill_event_history(user["id"], self.devices, yesterday, self.tariff)
+        self.events = self.db.get_events(user["id"])
+        self.events_page.reload()
+        # «За всё время» - не меньше, чем набралось за всю историю дома
+        history = self.db.energy_totals(user["id"], yesterday)
+        sim = self.simulator
+        sim.total_generated_wh = max(sim.total_generated_wh, history[0])
+        sim.total_import_wh = max(sim.total_import_wh, history[1])
+        sim.total_export_wh = max(sim.total_export_wh, history[2])
 
         self.simulator.updated.connect(self.on_energy_update)
         self.solar_panel.speed_changed.connect(self.simulator.set_speed)
@@ -7086,10 +7405,11 @@ class MainWindow(QMainWindow):
 
     def log_event(self, category, icon, text, toast=False, color=None):
         sim_time = sim_time_text(self.simulator.sim_minutes)
-        event = {"sim_time": sim_time, "category": category, "icon": icon, "text": text}
-        self.db.add_event(self.user["id"], sim_time, category, icon, text)
+        day = self.simulator.sim_date()
+        event = {"day": day.isoformat(), "sim_time": sim_time, "category": category, "icon": icon, "text": text}
+        self.db.add_event(self.user["id"], day, sim_time, category, icon, text)
         self.events.append(event)
-        self.events = self.events[-300:]
+        self.events = self.events[-EVENTS_LIMIT:]
         self.events_page.add_event(event)
         if self.pages.currentWidget() is not self.events_page:
             self.unread_events += 1
