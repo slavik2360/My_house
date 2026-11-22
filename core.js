@@ -166,6 +166,9 @@ function lightRgb(d) {
 
 function deviceStatusHtml(d, reading) {
   const m = MODELS[d.model] || { caps: [] }, s = d.s, t = d.type, caps = m.caps, group = TYPES[t].group;
+  if (d._state === "broken") return `<span style="color:#e5484d;font-weight:700">⚠️ Неисправно</span> · ${esc(d._issue || "")}`;
+  if (d._state === "offline") return `<span style="color:#e08a00;font-weight:700">📵 Нет связи</span> · устройство не отвечает`;
+  if (s.battery !== undefined && s.battery < 20 && d.on) return `<span style="color:#e08a00;font-weight:700">🪫 Батарейка ${s.battery}%</span> · ${reading ? esc(reading) : "замените батарейку"}`;
   if (t === "irrigation") {
     const zones = m.zones || 1, per = s.irr_minutes || 10;
     if (d.on) {
@@ -296,7 +299,7 @@ function newHome(userId) {
 function addDevice(home, roomId, modelCode, name, settings, on) {
   const m = MODELS[modelCode];
   const d = { id: home.nextId++, roomId, type: m.type, model: modelCode, name, on: on ?? isAlwaysOn(m.type),
-              s: Object.assign(defaultSettings(m), settings || {}) };
+              s: Object.assign(defaultSettings(m), settings || {}), created: isoDate(new Date()) };
   home.devices.push(d);
   return d;
 }
@@ -404,6 +407,190 @@ function backfillEnergyHistory(user, home) {
   home.totals.exp = Math.max(home.totals.exp, sums[2]);
 }
 
+// ---------- паспорт устройства: покупка, гарантия, обслуживание, неисправности (как в home.py) ----------
+// Всё детерминировано (зависит от пользователя и устройства), поэтому журнал и отчёты сходятся.
+// Даты хранятся строками "ГГГГ-ММ-ДД" - их можно сравнивать как строки.
+
+const WARRANTY_MONTHS = { washer: 24, dishwasher: 24, fridge: 24, tv: 24, robot_vacuum: 24, floor_washer: 24, lawn_mower: 24,
+  irrigation: 24, dehumidifier: 24, air_purifier: 24, door_lock: 24, safe: 24, air_conditioner: 36, ev_charger: 36,
+  water_heater: 36, inverter: 60, battery_bms: 120 };
+const TYPE_PRICE_KZT = { washer: 230000, robot_vacuum: 180000, floor_washer: 150000, vacuum: 120000, camera: 25000,
+  doorbell: 35000, door_lock: 90000, safe: 70000, temp_sensor: 9000, presence_sensor: 25000, smoke_sensor: 12000,
+  door_sensor: 7000, leak_sensor: 9000, light_sensor: 8000, motion_sensor: 9000, speaker: 80000, tv: 280000,
+  humidifier: 30000, heater: 45000, aroma: 15000, air_conditioner: 260000, fan: 30000, air_purifier: 70000,
+  dehumidifier: 90000, router: 40000, gateway: 30000, repeater: 15000, light_strip: 18000, desk_lamp: 25000,
+  bedside_lamp: 20000, ceiling_light: 45000, spot_light: 9000, bulb: 7000, night_light: 8000, socket: 7000, switch: 9000,
+  remote: 8000, panel: 40000, water_dispenser: 60000, air_fryer: 45000, multicooker: 40000, fridge: 420000,
+  microwave: 55000, kettle: 25000, dishwasher: 210000, lawn_mower: 650000, irrigation: 90000, inverter: 900000,
+  battery_bms: 60000, ev_charger: 400000, water_heater: 120000 };
+const SOLAR_SYSTEM_COST_KZT = 4500000;  // панели 6 кВт и аккумулятор 30 кВт·ч
+const MAINTENANCE = {
+  air_conditioner: [90, "чистка фильтров внутреннего блока"], robot_vacuum: [60, "чистка щётки и замена фильтра"],
+  vacuum: [90, "чистка фильтра и контейнера"], floor_washer: [30, "самоочистка и замена фильтра"],
+  humidifier: [60, "замена фильтра-испарителя"], air_purifier: [120, "замена HEPA-фильтра"],
+  washer: [90, "чистка фильтра слива и уплотнителя"], dishwasher: [30, "чистка фильтра и форсунок"],
+  kettle: [45, "удаление накипи"], fridge: [180, "чистка уплотнителя и решётки"], lawn_mower: [60, "заточка ножей"],
+  irrigation: [90, "промывка фильтров и форсунок"], smoke_sensor: [30, "проверка датчика кнопкой «Тест»"],
+  inverter: [180, "осмотр инвертора и чистка панелей"], ev_charger: [180, "проверка кабеля и разъёма"],
+  heater: [180, "очистка от пыли"], water_heater: [180, "слив осадка, проверка анода"],
+  camera: [180, "протирка объектива, проверка записи"] };
+const BATTERY_LIFE_DAYS = { motion_sensor: 215, door_lock: 300, smoke_sensor: 1500, leak_sensor: 600, temp_sensor: 420,
+  door_sensor: 700, presence_sensor: 500, safe: 900, light_sensor: 800, remote: 700, doorbell: 240 };
+const BATTERY_LOW = 20;
+const HISTORY_EPOCH = "2026-11-22";  // устройства до этой даты (и стартовые) считаются установленными с HOME_SINCE
+const INCIDENT_PLAN = [
+  [74, 3, "offline", ["leak_sensor", "door_sensor", "smoke_sensor", "temp_sensor", "motion_sensor"]],
+  [128, 2, "broken", ["air_conditioner", "robot_vacuum", "washer", "dishwasher", "humidifier", "lawn_mower"]],
+  [184, null, "offline", ["temp_sensor", "presence_sensor", "door_sensor", "camera", "smoke_sensor", "leak_sensor"]],
+];
+const FAULT_TEXTS = {
+  air_conditioner: ["ошибка E1: засорён фильтр, кондиционер остановился", "фильтры очищены, ошибка сброшена"],
+  robot_vacuum: ["ошибка 5: заблокирована основная щётка", "щётка очищена от намотавшихся волос"],
+  washer: ["ошибка E21: не сливается вода", "прочищен фильтр сливного насоса"],
+  dishwasher: ["ошибка E24: засор слива", "прочищены фильтр и сливной шланг"],
+  humidifier: ["не срабатывает датчик уровня воды", "датчик очищен от налёта"],
+  lawn_mower: ["застряла у забора, буксует колесо", "робот освобождён, колёса очищены"],
+};
+const DEVICE_STATES = { ok: ["Работает", "#00a05e"], off: ["Выключено", "#8aa0b2"], offline: ["Нет связи", "#e08a00"],
+  broken: ["Неисправно", "#e5484d"] };
+const ALWAYS_RUNNING_TYPES = new Set(["fridge", "inverter", "battery_bms", "router", "gateway", "repeater", "camera",
+  "doorbell", "door_lock", "safe", "temp_sensor", "presence_sensor", "smoke_sensor", "door_sensor", "leak_sensor",
+  "light_sensor", "motion_sensor", "socket", "switch", "panel"]);
+const SEED_KEYS = new Set(D.seedDevices.map(([room, model, name]) => `${room}|${model}|${name}`));
+
+const isoAdd = (iso, n) => isoDate(addDays(parseIso(iso), n));
+const isoDiff = (a, b) => Math.round((parseIso(b) - parseIso(a)) / 864e5);  // b - a, дней
+function isoAddMonths(iso, months) {
+  const d = parseIso(iso), m = d.getMonth() + months, y = d.getFullYear() + Math.floor(m / 12), mm = ((m % 12) + 12) % 12;
+  const last = new Date(y, mm + 1, 0).getDate();
+  return isoDate(new Date(y, mm, Math.min(d.getDate(), last)));
+}
+function roomNameOf(home, d) { return (home.rooms.find(r => r.id === d.roomId) || {}).name || ""; }
+
+function devicePassport(userId, home, d) {
+  const rnd = seededRandom(`passport-${userId}-${d.id}`), t = d.type;
+  const int = (a, b) => a + Math.floor(rnd() * (b - a + 1));
+  const offset = t === "inverter" ? 0 : int(0, 20);
+  const seeded = SEED_KEYS.has(`${roomNameOf(home, d)}|${d.model}|${d.name}`);
+  const added = d.created && !seeded && d.created > HISTORY_EPOCH ? d.created : isoAdd(isoDate(HOME_SINCE), offset);
+  const boughtEarlier = t !== "inverter" && rnd() < 0.3;
+  const purchase = isoAdd(added, -(boughtEarlier ? int(200, 420) : int(0, 10)));
+  const price = Math.max(990, Math.round((TYPE_PRICE_KZT[t] || 20000) * (0.8 + 0.4 * rnd()) / 1000) * 1000 - 10);
+  const brand = (d.model.split("_")[0].toUpperCase().replace(/[^A-Z]/g, "").slice(0, 4)) || "DEV";
+  const months = WARRANTY_MONTHS[t] || 12;
+  const life = (BATTERY_LIFE_DAYS[t] || 600) * (0.9 + 0.2 * rnd());
+  const serial = `${brand}-${Math.floor(rnd() * 4294967296).toString(16).toUpperCase().padStart(8, "0")}`;
+  return { added, purchase, price, serial, firmware: `${int(1, 4)}.${int(0, 9)}.${int(10, 99)}`, warrantyMonths: months,
+           warrantyUntil: isoAddMonths(purchase, months), batteryLife: life, boughtEarlier };
+}
+function devicePassports(userId, home) {
+  const out = {};
+  home.devices.forEach(d => { out[d.id] = devicePassport(userId, home, d); });
+  return out;
+}
+
+function syntheticIncidents(home, passports) {
+  const out = [], used = new Set();
+  INCIDENT_PLAN.forEach(([offset, duration, kind, types]) => {
+    const start = isoAdd(isoDate(HOME_SINCE), offset);
+    const cands = types.flatMap(t => home.devices.filter(d => d.type === t && !used.has(d.id) && passports[d.id].added < isoAdd(start, -7)));
+    if (!cands.length) return;
+    const d = cands[0];
+    used.add(d.id);
+    let issue, fix;
+    if (kind === "broken") [issue, fix] = FAULT_TEXTS[d.type] || ["устройство не отвечает на команды", "перезагружено, работает"];
+    else if (d.s.battery !== undefined) [issue, fix] = ["нет связи со шлюзом — разрядилась батарейка", "заменена батарейка"];
+    else [issue, fix] = ["нет связи: устройство пропало из сети Wi-Fi", "перезагружен роутер, устройство снова в сети"];
+    if (duration === null) { fix = null; if (kind === "offline") issue = "нет связи со шлюзом — устройство не отвечает"; }
+    out.push({ deviceId: d.id, kind, start, end: duration ? isoAdd(start, duration) : null, issue, fix, battery: fix === "заменена батарейка" });
+  });
+  return out;
+}
+function deviceIncidents(d, synthetic) {
+  const resolved = d.s.resolved || {}, out = [];
+  synthetic.forEach(inc => {
+    if (inc.deviceId !== d.id) return;
+    inc = Object.assign({}, inc);
+    if (inc.end === null && resolved[inc.start]) { inc.end = resolved[inc.start]; inc.fix = "отмечено исправленным вручную"; }
+    out.push(inc);
+  });
+  (d.s.incidents || []).forEach(inc => out.push({ deviceId: d.id, kind: inc.kind || "broken", start: inc.start, end: inc.end || null,
+    issue: inc.issue || "", fix: inc.fix || null, manual: true, battery: false }));
+  return out.sort((a, b) => (a.start < b.start ? -1 : a.start > b.start ? 1 : 0));
+}
+function activeIncident(incs, day) {
+  const act = incs.filter(i => i.start <= day && (i.end === null || i.end > day));
+  return act.length ? act[act.length - 1] : null;
+}
+function deviceState(d, incs, day) { const inc = activeIncident(incs, day); return inc ? inc.kind : d.on ? "ok" : "off"; }
+function batteryLevel(d, p, incs, day) {
+  if (d.s.battery === undefined) return null;
+  let since = p.added;
+  incs.forEach(inc => { if (inc.battery && inc.end && inc.end <= day && inc.end > since) since = inc.end; });
+  if (d.s.battery_since && d.s.battery_since > since) since = d.s.battery_since;
+  return Math.round(Math.max(3, Math.min(100, 100 - isoDiff(since, day) / p.batteryLife * 100)));
+}
+const batteryDaysLeft = (level, p) => Math.max(0, Math.floor((level - 3) / 100 * p.batteryLife));
+function serviceDates(userId, d, p, until) {
+  const spec = MAINTENANCE[d.type];
+  if (!spec) return [];
+  const out = new Set();
+  let skipped = false;
+  for (let k = 1; ; k++) {
+    const planned = isoAdd(p.added, spec[0] * k);
+    if (planned > until) break;
+    const rnd = seededRandom(`service-${userId}-${d.id}-${k}`);
+    if (skipped || rnd() >= 0.18) {  // примерно каждое шестое обслуживание пропущено, но не два подряд
+      skipped = false;
+      const done = isoAdd(planned, Math.floor(rnd() * 5));
+      if (done <= until) out.add(done);
+    } else skipped = true;
+  }
+  if (d.s.service_done && d.s.service_done <= until) out.add(d.s.service_done);
+  return [...out].sort();
+}
+function maintenanceStatus(userId, d, p, day) {
+  const spec = MAINTENANCE[d.type];
+  if (!spec) return null;
+  const done = serviceDates(userId, d, p, day), last = done.length ? done[done.length - 1] : null;
+  const next = isoAdd(last || p.added, spec[0]), days = isoDiff(day, next);
+  return { task: spec[1], interval: spec[0], last, next, days, status: days < 0 ? "overdue" : days <= 7 ? "soon" : "ok" };
+}
+function warrantyStatus(p, day) {
+  const days = isoDiff(day, p.warrantyUntil);
+  return [days < 0 ? "expired" : days <= 60 ? "ending" : "active", days];
+}
+
+function usageHours(t, day, summer, sunny) {
+  const weekend = day.getDay() === 0 || day.getDay() === 6, month = day.getMonth() + 1;
+  const warm = month >= 5 && month <= 9, cold = summer < 0.35, hot = summer > 0.8 && sunny > 0.65;
+  if (ALWAYS_RUNNING_TYPES.has(t)) return 24;
+  const table = { tv: weekend ? 5 : 3.5, speaker: 3, bulb: summer < 0.6 ? 6 : 3.5, ceiling_light: 5, spot_light: 4, desk_lamp: 3,
+    bedside_lamp: 1, night_light: 8, kettle: 0.25, light_strip: (warm && weekend) || month === 12 ? 4 : 0.3,
+    washer: weekend ? 0.9 : 0.5, dishwasher: 1.6, vacuum: weekend ? 0.4 : 0.1, robot_vacuum: 2, floor_washer: 0.5,
+    air_conditioner: hot ? 5 : summer > 0.62 ? 1.2 : 0, heater: cold ? 6 : summer < 0.5 ? 1 : 0, humidifier: cold ? 12 : 6,
+    ev_charger: sunny > 0.7 && summer > 0.4 ? 1.5 : 0.3, lawn_mower: warm ? 1.5 : 0, irrigation: warm ? 0.3 : 0,
+    water_heater: 3, microwave: 0.3, multicooker: 1, air_fryer: 0.3, water_dispenser: 6, fan: hot ? 6 : 0, air_purifier: 10,
+    dehumidifier: warm ? 3 : 1, aroma: 4 };
+  return table[t] ?? 2;
+}
+// Оценка расхода каждого устройства за день (Вт·ч), масштабированная до потребления дома; "other" - фон дома
+function deviceEnergySplit(home, passports, incidentsBy, key, consumed, generated) {
+  const day = parseIso(key), summer = 0.5 + 0.5 * Math.cos(2 * Math.PI * (dayOfYear(day) - 172) / 365);
+  const sunny = generated === undefined ? 0.8 : generated / (C.SOLAR_PEAK_W * (1.6 + 4.2 * summer));
+  const raw = {};
+  home.devices.forEach(d => {
+    if (passports[d.id].added > key || activeIncident(incidentsBy[d.id] || [], key)) return;
+    const m = MODELS[d.model];
+    if (!m) return;
+    raw[d.id] = m.power * (D.duty[d.type] ?? 1) * usageHours(d.type, day, summer, sunny);
+  });
+  const other = C.BASE_LOAD_W * 24 + 1500, total = Object.values(raw).reduce((a, b) => a + b, 0) + other;
+  const k = total ? consumed / total : 0, out = { other: other * k };
+  Object.entries(raw).forEach(([id, v]) => { out[id] = v * k; });
+  return out;
+}
+
 // ---------- смоделированный журнал событий (как synthetic_event_history в home.py) ----------
 
 const clock = m => { m = Math.max(0, Math.min(1439, Math.floor(m))); return `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`; };
@@ -416,9 +603,15 @@ function syntheticEventHistory(userId, home, dayKeys) {
   const roomName = d => (home.rooms.find(r => r.id === d.roomId) || {}).name || "";
   const byType = {};
   home.devices.forEach(d => { (byType[d.type] = byType[d.type] || []).push(d); });
-  // устройства появлялись в доме постепенно, за первые три недели (инвертор - с первого дня)
-  const orderRnd = seededRandom("devices-added-" + userId), added = {};
-  home.devices.forEach(d => { added[d.id] = isoDate(addDays(HOME_SINCE, d.type === "inverter" ? 0 : Math.floor(orderRnd() * 21))); });
+  // даты установки, неисправности и обслуживание - те же, что в паспорте устройства и в отчётах
+  const passports = devicePassports(userId, home), added = {};
+  home.devices.forEach(d => { added[d.id] = passports[d.id].added; });
+  const incidents = syntheticIncidents(home, passports), incidentsBy = {}, services = {};
+  const lastKey = dayKeys.length ? dayKeys[dayKeys.length - 1] : isoDate(HOME_SINCE);
+  home.devices.forEach(d => {
+    incidentsBy[d.id] = deviceIncidents(d, incidents);
+    services[d.id] = new Set(serviceDates(userId, d, passports[d.id], lastKey));
+  });
   const washerModes = (D.modes.washer || [["Хлопок 60°"]]).map(m => m[0]);
   const out = [];
   dayKeys.forEach(key => {
@@ -427,8 +620,18 @@ function syntheticEventHistory(userId, home, dayKeys) {
     const pick = xs => xs[Math.floor(rnd() * xs.length)];
     const evs = [];
     const add = (m, cat, icon, text) => evs.push({ m: Math.max(0, Math.min(1439, Math.floor(m))), cat, icon, text });
-    const present = t => (byType[t] || []).filter(d => added[d.id] <= key);
+    const present = t => (byType[t] || []).filter(d => added[d.id] <= key && !activeIncident(incidentsBy[d.id], key));
     const toggle = (d, m, on = true) => add(m, "device", on ? "🟢" : "⚪", `${on ? "Включено" : "Выключено"}: ${d.name} (${roomName(d)})`);
+
+    incidents.forEach(inc => {
+      const d = home.devices.find(x => x.id === inc.deviceId);
+      if (!d) return;
+      if (inc.start === key) add(int(420, 1200), "device", inc.kind === "offline" ? "📵" : "⚠️", `${d.name}: ${inc.issue}`);
+      if (inc.end === key && inc.fix) add(int(600, 1140), "device", "✅", `${d.name}: исправлено — ${inc.fix}`);
+    });
+    home.devices.forEach(d => {
+      if (services[d.id].has(key)) add(int(600, 1200), "device", "🧰", `${d.name}: выполнено обслуживание — ${MAINTENANCE[d.type][1]}`);
+    });
 
     const summer = 0.5 + 0.5 * Math.cos(2 * Math.PI * (dayOfYear(day) - 172) / 365);
     const weekend = day.getDay() === 0 || day.getDay() === 6, month = day.getMonth() + 1;
@@ -605,6 +808,7 @@ class Engine {
     const today = isoDate(this.startDate);
     this.home.events.forEach(e => { if (!e.day) e.day = today; });
     this.home.liveDays = [...new Set((this.home.liveDays || []).concat(this.home.events.map(e => e.day)))];
+    this.updateHealth();
     this.minutesPerTick = 1;
     this.cloudiness = Math.random() * 0.4;
     this.today = { gen: 0, cons: 0, imp: 0, exp: 0 };
@@ -734,8 +938,58 @@ class Engine {
 
   // ---------- действия ----------
 
+  // ---------- паспорт, неисправности, батарейки, обслуживание ----------
+
+  updateHealth() {
+    const today = isoDate(this.simDate());
+    this.passports = devicePassports(this.user.id, this.home);
+    this.incidents = syntheticIncidents(this.home, this.passports);
+    this.home.devices.forEach(d => {
+      const incs = deviceIncidents(d, this.incidents), inc = activeIncident(incs, today);
+      d._state = inc ? inc.kind : null;
+      d._issue = inc ? inc.issue : "";
+      const level = batteryLevel(d, this.passports[d.id], incs, today);
+      if (level !== null) d.s.battery = level;
+    });
+  }
+  deviceInfo(d) {
+    if (!this.passports || !this.passports[d.id]) this.updateHealth();
+    const today = isoDate(this.simDate()), p = this.passports[d.id], incs = deviceIncidents(d, this.incidents);
+    return { passport: p, incidents: incs, incident: activeIncident(incs, today), state: deviceState(d, incs, today),
+             battery: batteryLevel(d, p, incs, today), maintenance: maintenanceStatus(this.user.id, d, p, today),
+             warranty: warrantyStatus(p, today), today };
+  }
+  markFault(d, issue) {
+    const today = isoDate(this.simDate()), kind = issue.toLowerCase().includes("связ") ? "offline" : "broken";
+    (d.s.incidents = d.s.incidents || []).push({ start: today, end: null, kind, issue });
+    if (d.on && kind === "broken") this.setOn(d, false, "system");
+    this.updateHealth(); Store.save();
+    this.log("device", kind === "offline" ? "📵" : "⚠️", `${d.name}: отмечено неисправным — ${issue}`, true, "#e5484d");
+  }
+  markFixed(d) {
+    const today = isoDate(this.simDate());
+    (d.s.incidents || []).forEach(inc => { if (!inc.end) { inc.end = today; inc.fix = "отмечено исправленным вручную"; } });
+    (this.incidents || []).forEach(inc => { if (inc.deviceId === d.id && inc.end === null) (d.s.resolved = d.s.resolved || {})[inc.start] = today; });
+    this.updateHealth(); Store.save();
+    this.log("device", "✅", `${d.name}: исправлено (отмечено вручную)`, true);
+  }
+  markService(d) {
+    d.s.service_done = isoDate(this.simDate());
+    this.updateHealth(); Store.save();
+    this.log("device", "🧰", `${d.name}: выполнено обслуживание — ${(MAINTENANCE[d.type] || [0, "обслуживание"])[1]}`, true);
+  }
+  markBattery(d) {
+    d.s.battery_since = isoDate(this.simDate());
+    this.updateHealth(); Store.save();
+    this.log("device", "🔋", `${d.name}: заменена батарейка`, true);
+  }
+
   setOn(d, on, source) {
     source = source || "user";
+    if (on && source === "user" && (d._state === "broken" || d._state === "offline")) {
+      if (this.hooks.onBlocked) this.hooks.onBlocked(d);
+      return;
+    }
     const s = d.s, t = d.type, requested = on;
     if (t === "irrigation" && on) {
       if (s.rain_sensor && this.raining()) { this.log("device", "🌧", d.name + ": идёт дождь — полив отменён", true); on = false; }

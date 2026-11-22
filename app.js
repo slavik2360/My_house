@@ -67,7 +67,10 @@ function startMain(user) {
   UI.user = user;
   Store.data.session = user.id;
   Store.save();
-  UI.engine = new Engine(user, { onTick: onTick, onEvent: onEvent });
+  UI.engine = new Engine(user, { onTick: onTick, onEvent: onEvent, onBlocked: d => {
+    showToast("⚠️", `${d.name}: ${d._state === "broken" ? "неисправно" : "нет связи"} — включить не получится. Отметьте «Исправлено» в окне устройства после ремонта.`, "#e5484d");
+    updateCard(d.id);
+  } });
   UI.roomId = null; UI.page = "devices"; UI.unread = 0;
   $("#login").classList.add("hidden");
   $("#main").classList.remove("hidden");
@@ -119,7 +122,8 @@ function renderPage() {
   const c = $("#content");
   c.innerHTML = "";
   UI.cards = {};
-  ({ devices: pageDevices, plan: pagePlan, energy: pageEnergy, events: pageEvents })[UI.page](c);
+  UI.engine.updateHealth();
+  ({ devices: pageDevices, plan: pagePlan, energy: pageEnergy, events: pageEvents, reports: pageReportsCenter })[UI.page](c);
   onTick(UI.engine.state);
 }
 
@@ -744,6 +748,48 @@ function openDevice(id) {
   if (m.battery) section("Питание", `🔋 ${s.battery ?? 100}% · ${m.battery}`);
   body.appendChild(h("div", "muted", `ℹ️ ${esc(m.desc)} · ${modelPowerText(m)}`));
 
+  // состояние, гарантия, обслуживание
+  const [svcBox] = section("🛠 Состояние, гарантия и обслуживание");
+  const svcInfo = h("div", "card svc-info");
+  const svcRow = h("div", "btn-row svc-row");
+  const faultBtn = h("button", "btn");
+  faultBtn.addEventListener("click", () => {
+    if (["broken", "offline"].includes(eng.deviceInfo(d).state)) eng.markFixed(d);
+    else {
+      const issue = prompt("Что случилось с устройством? (например: не включается, нет связи с устройством, ошибка на дисплее)", "Не включается");
+      if (!issue || !issue.trim()) return;
+      eng.markFault(d, issue.trim().slice(0, 80));
+    }
+    refresh();
+  });
+  svcRow.appendChild(faultBtn);
+  if (MAINTENANCE[d.type]) {
+    const b = h("button", "btn", "🧰 Обслуживание выполнено");
+    b.addEventListener("click", () => { eng.markService(d); refresh(); });
+    svcRow.appendChild(b);
+  }
+  if (s.battery !== undefined) {
+    const b = h("button", "btn", "🔋 Батарейка заменена");
+    b.addEventListener("click", () => { eng.markBattery(d); refresh(); });
+    svcRow.appendChild(b);
+  }
+  svcBox.append(svcInfo, svcRow);
+  const refreshService = () => {
+    const info = eng.deviceInfo(d), p = info.passport, inc = info.incident, mt = info.maintenance;
+    const [label, color] = DEVICE_STATES[info.state], [wSt, wDays] = info.warranty;
+    const lines = [`<b>Состояние:</b> <b style="color:${color}">${label}</b>` + (inc ? ` с ${rpDate(inc.start)} — ${esc(inc.issue)}` : "")];
+    if (info.battery !== null) lines.push(`<b>Батарейка:</b> ${rpBattery(info.battery)} · хватит примерно на ${rpDays(batteryDaysLeft(info.battery, p))}`);
+    lines.push(`<b>Куплено:</b> ${rpDate(p.purchase)} за ${formatMoney(p.price)} · установлено ${rpDate(p.added)}`);
+    lines.push(`<b>Гарантия</b> (${p.warrantyMonths} мес.): ` + (wSt === "expired" ? `<span style="color:#8aa0b2">истекла ${rpDate(p.warrantyUntil)}</span>`
+      : wSt === "ending" ? `<b style="color:#e08a00">до ${rpDate(p.warrantyUntil)} — осталось ${rpDays(wDays)}</b>` : `<span style="color:#00a05e">до ${rpDate(p.warrantyUntil)}</span>`));
+    if (mt) lines.push(`<b>Обслуживание:</b> ${mt.task} раз в ${mt.interval} дн. · последнее ${mt.last ? rpDate(mt.last) : "ещё не проводилось"} · ${rpMaint(mt)}`);
+    lines.push(`<span class="muted">Серийный номер ${p.serial} · прошивка ${p.firmware}</span>`);
+    svcInfo.innerHTML = lines.join("<br>");
+    const broken = ["broken", "offline"].includes(info.state);
+    faultBtn.textContent = broken ? "✅ Исправлено" : "⚠️ Отметить неисправным";
+    faultBtn.className = broken ? "btn primary" : "btn danger";
+  };
+
   // нижние кнопки
   const actions = h("div", "btn-row");
   const rename = h("button", "btn", "Переименовать");
@@ -767,9 +813,12 @@ function openDevice(id) {
   function refresh() {
     if (power.checked !== !!d.on) power.checked = !!d.on;
     const reading = eng.readings[d.id];
-    live.innerHTML = d.on || ROBOT_TYPES.includes(d.type)
-      ? `${reading ? `<b>${esc(reading)}</b> · ` : ""}Потребление сейчас: <b>≈${formatPower(devicePower(d))}</b>`
-      : "<b>Выключено</b>";
+    live.innerHTML = d._state === "broken" ? `<b style="color:#e5484d">⚠️ Неисправно</b> · ${esc(d._issue || "")}`
+      : d._state === "offline" ? `<b style="color:#e08a00">📵 Нет связи</b> · устройство не отвечает`
+      : d.on || ROBOT_TYPES.includes(d.type)
+        ? `${reading ? `<b>${esc(reading)}</b> · ` : ""}Потребление сейчас: <b>≈${formatPower(devicePower(d))}</b>`
+        : "<b>Выключено</b>";
+    refreshService();
     if (timerHint) {
       if (s.off_at !== undefined && s.off_at !== null) timerHint.textContent = `Выключится в ${simTimeText(s.off_at)} (по времени дома)`;
       else { timerHint.textContent = "Таймер не установлен"; if (Number(timerSel.value)) timerSel.value = 0; }
@@ -1184,3 +1233,69 @@ function exportReportCsv() {
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 2000);
 }
+
+// ---------- отчёты в PDF (reports.js) ----------
+
+UI.reportsPeriod = "month";
+
+function reportsRange() {
+  const today = isoDate(UI.engine.simDate()), since = isoDate(HOME_SINCE);
+  if (UI.reportsPeriod === "custom") {
+    let a = UI.reportsFrom || today.slice(0, 8) + "01", b = UI.reportsTo || today;
+    if (a > b) [a, b] = [b, a];
+    return [a < since ? since : a, b > today ? today : b];
+  }
+  const n = RP_PERIODS.find(p => p[0] === UI.reportsPeriod)[2], a = isoAdd(today, -(n - 1));
+  return [a < since ? since : a, today];
+}
+
+function pageReportsCenter(c) {
+  c.appendChild(h("p", "muted", "Отчёт открывается на экране, а кнопка «Сохранить в PDF» превращает его в PDF-файл (на iPhone: «Поделиться» → «Печать» → жест «развести двумя пальцами» по превью → «Сохранить в Файлы»)."));
+  const chips = h("div", "chips");
+  RP_PERIODS.forEach(([code, cap]) => {
+    const b = h("button", "chip" + (UI.reportsPeriod === code ? " active" : ""), cap);
+    b.addEventListener("click", () => { UI.reportsPeriod = code; renderPage(); });
+    chips.appendChild(b);
+  });
+  c.appendChild(chips);
+  if (UI.reportsPeriod === "custom") {
+    const [a, b] = reportsRange(), row = h("div", "row");
+    row.style.margin = "10px 0";
+    row.innerHTML = `<input type="date" id="rpFrom" value="${a}"> — <input type="date" id="rpTo" value="${b}">`;
+    c.appendChild(row);
+    row.querySelector("#rpFrom").addEventListener("change", e => { UI.reportsFrom = e.target.value; renderPage(); });
+    row.querySelector("#rpTo").addEventListener("change", e => { UI.reportsTo = e.target.value; renderPage(); });
+  }
+  const [a, b] = reportsRange();
+  c.appendChild(h("p", "muted", `Отчёт будет за ${rpDate(a)} — ${rpDate(b)} (${rpDays(isoDiff(a, b) + 1)})` + (a === isoDate(HOME_SINCE) ? ` · данные есть с ${rpDate(a)}` : "")));
+  RP_KINDS.forEach(([code, title, icon, desc]) => {
+    const card = h("div", "card rp-card", `<div class="rp-card-title">${icon} ${esc(title)}</div><p class="muted">${esc(desc)}</p>
+      <div class="rp-inside"><b>Что внутри:</b><br>${RP_CONTENTS[code].map(x => "• " + esc(x)).join("<br>")}</div>`);
+    const btn = h("button", "btn primary block", "📄 Открыть отчёт");
+    btn.addEventListener("click", () => openReport(code));
+    card.appendChild(btn);
+    c.appendChild(card);
+  });
+}
+
+function openReport(kind) {
+  const [a, b] = reportsRange();
+  const view = $("#reportView");
+  $("#reportDoc").innerHTML = rpBuild(kind, UI.engine, a, b);
+  view.dataset.title = `${RP_TITLES[kind]} ${rpDate(a)}-${rpDate(b)}`;
+  view.classList.remove("hidden");
+  view.scrollTop = 0;
+  document.body.classList.add("report-open");
+}
+function closeReport() {
+  $("#reportView").classList.add("hidden");
+  $("#reportDoc").innerHTML = "";
+  document.body.classList.remove("report-open");
+}
+$("#reportClose").addEventListener("click", closeReport);
+$("#reportPrint").addEventListener("click", () => {
+  const title = document.title;
+  document.title = $("#reportView").dataset.title;   // имя PDF-файла при сохранении
+  window.print();
+  setTimeout(() => { document.title = title; }, 1000);
+});
